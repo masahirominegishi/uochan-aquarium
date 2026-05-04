@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>Rive Demo (うおちゃん検討用)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: linear-gradient(180deg, #0a3a5e 0%, #02182f 100%);
+      color: #e6f1ff;
+      font-family: -apple-system, "Hiragino Sans", sans-serif;
+      min-height: 100vh;
+    }
+    .wrap {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 24px 20px 60px;
+    }
+    h1 {
+      font-size: 22px;
+      margin: 0 0 4px;
+    }
+    .lead {
+      color: #9cc6e8;
+      font-size: 13px;
+      margin: 0 0 20px;
+    }
+    .stage {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+      overflow: hidden;
+      position: relative;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 520px;
+      background: #fff;
+    }
+    .err {
+      padding: 14px 18px;
+      background: #ffe8e8;
+      color: #a32020;
+      font-size: 13px;
+      border-top: 1px solid #f1c0c0;
+      display: none;
+    }
+    .err.show { display: block; }
+    .note {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 10px;
+      padding: 16px 18px;
+      margin-top: 22px;
+      font-size: 14px;
+      line-height: 1.7;
+    }
+    .note h2 {
+      font-size: 15px;
+      margin: 0 0 10px;
+      color: #ffd989;
+    }
+    code {
+      background: rgba(0, 0, 0, 0.4);
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+    a {
+      color: #79c8ff;
+    }
+    .links {
+      margin-top: 20px;
+      font-size: 13px;
+    }
+    .links a {
+      margin-right: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Rive 比較デモ</h1>
+    <p class="lead">
+      これは Rive 公式の公開サンプル（<code>vehicles.riv</code>）です。
+      <strong>うおちゃんの絵ではありません</strong>が、Rive で作り込んだらどれくらいリッチに動かせるか／インタラクションがどれくらい滑らかかを体感するためのものです。
+    </p>
+
+    <div class="stage">
+      <canvas id="canvas" width="900" height="520"></canvas>
+      <div id="err" class="err"></div>
+    </div>
+
+    <div class="note">
+      <h2>このデモで見てほしいポイント</h2>
+      <ul>
+        <li><strong>動きの滑らかさ</strong> ― ベジェ曲線ベースで補間されるので、p5.js のサイン波変形より遥かに自然</li>
+        <li><strong>状態遷移</strong> ― idle → 加速 → 減速のような切り替えがエディタで設計可能（state machine）</li>
+        <li><strong>軽さ</strong> ― ベクター描画＋WebGL2 なので、画像スプライトより軽くて鮮明</li>
+        <li><strong>これを「うおちゃん版」にすると</strong> ― Rive エディタ（無料）でうおちゃんのレイヤー画像を取り込み、骨組みと state machine を作り込む必要あり（学習コストはここ）</li>
+      </ul>
+
+      <h2 style="margin-top: 16px;">Rive 採用時のワークフロー</h2>
+      <ol>
+        <li>Rive エディタ（<a href="https://rive.app" target="_blank" rel="noopener">rive.app</a>、ブラウザ・無料）でアカウント作成</li>
+        <li>うおちゃんのレイヤー分け画像（前回案内した body/head/arm/leg 等）をインポート</li>
+        <li>各パーツに骨を入れ、idle / approach / speak の各アニメーションを作成</li>
+        <li><code>.riv</code> として書き出し、`assets/uochan.riv` に置く</li>
+        <li>このページの <code>src</code> をそのファイルに差し替え、Python 側からは <code>state machine</code> の input をいじって動きを切り替える</li>
+      </ol>
+
+      <h2 style="margin-top: 16px;">p5.js（今のうおちゃん版）との比較</h2>
+      <ul>
+        <li><strong>初期コスト</strong>：Rive はエディタ習得が必要（数日〜）／p5.js は今すぐ動く</li>
+        <li><strong>動きの質</strong>：Rive ＞＞ p5.js（特に「寄ってくる時の生き物感」「話す時の口パク」）</li>
+        <li><strong>ラズパイ動作</strong>：両方軽い（Rive は WebGL2 必須なので Pi 5 推奨）</li>
+        <li><strong>後からの調整</strong>：Rive はエディタ操作で済む／p5.js はコード書き換え</li>
+      </ul>
+    </div>
+
+    <p class="links">
+      <a href="../">← p5.js 版のうおちゃんに戻る</a>
+      <a href="https://rive.app/community" target="_blank" rel="noopener">Rive Community（他のサンプルを見る）</a>
+    </p>
+  </div>
+
+  <!-- Rive ランタイム（Canvas 版、CDN） -->
+  <script src="https://unpkg.com/@rive-app/canvas@2.37.5"></script>
+  <script>
+    const errEl = document.getElementById("err");
+    function showError(msg) {
+      console.error(msg);
+      errEl.textContent = msg;
+      errEl.classList.add("show");
+    }
+
+    // ランタイムが読めているか確認
+    if (typeof rive === "undefined") {
+      showError("Rive ランタイムの読み込みに失敗しました（CDN へのアクセスが遮断されている可能性があります）。");
+    } else {
+      // ---------- Rive サンプルを再生 ----------
+      // src : 公開サンプル（車が悪路を走るデモ、bumpy state machine 入り）
+      const r = new rive.Rive({
+        src: "https://cdn.rive.app/animations/vehicles.riv",
+        canvas: document.getElementById("canvas"),
+        autoplay: true,
+        stateMachines: "bumpy",
+        onLoad: () => {
+          // canvas のピクセル解像度を CSS サイズに合わせる（高解像度ディスプレイ対応）
+          r.resizeDrawingSurfaceToCanvas();
+        },
+        onLoadError: (e) => {
+          showError("Rive ファイルの読み込みに失敗しました: " + (e && e.message ? e.message : e));
+        },
+      });
+
+      // ウィンドウリサイズ追従
+      window.addEventListener("resize", () => {
+        r.resizeDrawingSurfaceToCanvas();
+      });
+    }
+  </script>
+</body>
+</html>

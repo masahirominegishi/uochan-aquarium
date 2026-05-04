@@ -1,0 +1,18 @@
+[Unit]
+Description=Aquarium WebSocket bridge (zone_state.json -> browser)
+After=network-online.target
+Wants=network-online.target uochan-camera.service
+
+[Service]
+Type=simple
+User=mine
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/home/mine/Documents/aquarium/bridge
+ExecStart=/home/mine/Documents/fish_ai_realtime/.venv/bin/python /home/mine/Documents/aquarium/bridge/aquarium_bridge.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=uochan.target

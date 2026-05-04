@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# ログ
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# エディタ
+.vscode/
+.idea/
+
+# 作業中のバックアップ
+*.bak.*

@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>Three.js Demo (うおちゃん比較用)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #000;
+      width: 100%;
+      height: 100%;
+      font-family: -apple-system, "Hiragino Sans", sans-serif;
+    }
+    canvas { display: block; }
+
+    #info {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      color: #fff;
+      background: rgba(0,0,0,0.5);
+      padding: 8px 12px;
+      font-size: 12px;
+      border-radius: 6px;
+      max-width: 320px;
+      line-height: 1.5;
+      z-index: 10;
+    }
+    #info a { color: #79c8ff; }
+    #info b { color: #ffd989; }
+
+    #fs-btn {
+      position: fixed;
+      right: 12px;
+      bottom: 12px;
+      padding: 8px 12px;
+      font-size: 12px;
+      color: #fff;
+      background: rgba(0,0,0,0.4);
+      border: 1px solid rgba(255,255,255,0.4);
+      border-radius: 6px;
+      cursor: pointer;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+  <div id="info">
+    <b>Three.js 比較デモ</b><br>
+    p5.js と同じ <code>fish.png</code> を 3D 空間で動かしています。<br>
+    奥から手前に近づくと <b>パースで本物の遠近</b>がつきます（p5.js は scale 偽装）。<br>
+    <a href="../">← p5.js 版に戻る</a>
+  </div>
+  <button id="fs-btn" onclick="document.documentElement.requestFullscreen()">⛶ フルスクリーン</button>
+
+  <!-- importmap で Three.js を ES モジュールとして読み込む（Three.js の現代的な作法） -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.163.0/build/three.module.js"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+
+    // =============================================================
+    // 1) シーン・カメラ・レンダラー（Three.js の三種の神器）
+    // =============================================================
+    const scene = new THREE.Scene();
+
+    // 透視投影カメラ：fov, アスペクト比, near, far
+    const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 6);  // 真横カメラ（z軸方向に少し離れた位置）
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    document.body.appendChild(renderer.domElement);
+
+    // =============================================================
+    // 2) 水の背景（フルスクリーンの板にグラデーションシェーダー）
+    // =============================================================
+    const bgGeo = new THREE.PlaneGeometry(2, 2);
+    const bgMat = new THREE.ShaderMaterial({
+      uniforms: { uTime: { value: 0 } },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position, 1.0);  // 画面いっぱい
+        }
+      `,
+      fragmentShader: `
+        varying vec2 vUv;
+        uniform float uTime;
+        // 簡易ノイズ（光のゆらぎ用）
+        float n(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233))) * 43758.5453); }
+        void main() {
+          // 上が明るい水色、下が深い青のグラデーション
+          vec3 top = vec3(0.45, 0.78, 0.90);
+          vec3 bot = vec3(0.04, 0.20, 0.39);
+          vec3 col = mix(bot, top, vUv.y);
+          // 上から差す光のすじをうっすら
+          float ray = sin((vUv.x + uTime * 0.05) * 30.0) * 0.5 + 0.5;
+          col += vec3(0.15) * ray * vUv.y * 0.6;
+          gl_FragColor = vec4(col, 1.0);
+        }
+      `,
+      depthWrite: false,
+      depthTest: false,
+    });
+    const bg = new THREE.Mesh(bgGeo, bgMat);
+    bg.frustumCulled = false;
+    scene.add(bg);
+
+    // =============================================================
+    // 3) うおちゃん（同じ fish.png を平面に貼る）
+    //    ポイント：平面を「横方向に細かく分割」しておくことで、
+    //              p5.js の縦スライス変形と同じことを 3D メッシュで実現できる
+    // =============================================================
+    const loader = new THREE.TextureLoader();
+    const fishTex = loader.load('../assets/fish.png');
+    fishTex.colorSpace = THREE.SRGBColorSpace;
+    fishTex.magFilter = THREE.LinearFilter;
+    fishTex.minFilter = THREE.LinearMipmapLinearFilter;
+
+    // 横24分割の平面ジオメトリ。後で各頂点を sin 波でずらしてしならせる
+    const fishW = 2.5;
+    const fishH = 2.0;
+    const fishGeo = new THREE.PlaneGeometry(fishW, fishH, 24, 1);
+
+    const fishMat = new THREE.MeshBasicMaterial({
+      map: fishTex,
+      transparent: true,
+      alphaTest: 0.02,        // 透過部分を完全カット（後ろの絵とのアルファ重なり防止）
+      side: THREE.DoubleSide,
+    });
+
+    const fish = new THREE.Mesh(fishGeo, fishMat);
+    scene.add(fish);
+
+    // 元の頂点 Y を保存（毎フレームここからの差分でしならせる）
+    const posAttr = fishGeo.attributes.position;
+    const baseY = new Float32Array(posAttr.count);
+    for (let i = 0; i < posAttr.count; i++) baseY[i] = posAttr.getY(i);
+
+    // 元の頂点 X も覚えておく（頭/尾の判定に使う）
+    const baseX = new Float32Array(posAttr.count);
+    for (let i = 0; i < posAttr.count; i++) baseX[i] = posAttr.getX(i);
+
+    // =============================================================
+    // 4) 気泡（粒子で奥行き感を出す）
+    // =============================================================
+    const bubbleGroup = new THREE.Group();
+    scene.add(bubbleGroup);
+    for (let i = 0; i < 40; i++) {
+      const b = new THREE.Mesh(
+        new THREE.SphereGeometry(0.04 + Math.random() * 0.05, 8, 8),
+        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 })
+      );
+      b.position.set(
+        (Math.random() - 0.5) * 12,
+        (Math.random() - 0.5) * 8,
+        (Math.random() - 0.5) * 4 - 0.5
+      );
+      b.userData.speed = 0.005 + Math.random() * 0.01;
+      b.userData.drift = Math.random() * Math.PI * 2;
+      bubbleGroup.add(b);
+    }
+
+    // =============================================================
+    // 5) 水草（手前と奥に配置してパララックス感）
+    // =============================================================
+    function makePlant(x, z, height, color) {
+      const g = new THREE.PlaneGeometry(0.5, height, 4, 8);
+      const m = new THREE.MeshBasicMaterial({
+        color, transparent: true, opacity: 0.85, side: THREE.DoubleSide,
+      });
+      const plant = new THREE.Mesh(g, m);
+      plant.position.set(x, -3 + height / 2, z);
+      plant.userData.swayPhase = Math.random() * Math.PI * 2;
+      plant.userData.baseX = x;
+      return plant;
+    }
+    const plants = [];
+    for (let i = 0; i < 6; i++) {
+      const p = makePlant(-5 + i * 2 + Math.random(), -1 - Math.random() * 1.5, 2 + Math.random(), 0x0e3a2a);
+      plants.push(p); scene.add(p);
+    }
+    for (let i = 0; i < 4; i++) {
+      const p = makePlant(-4 + i * 2.5 + Math.random(), 1 + Math.random(), 2.5 + Math.random(), 0x05201a);
+      plants.push(p); scene.add(p);
+    }
+
+    // =============================================================
+    // 6) 魚の動き（状態管理は p5.js 版と同じ idle/approach/speak/leave を準備）
+    // =============================================================
+    const fishState = {
+      state: 'idle',
+      tailPhase: 0,
+      bobPhase: Math.random() * Math.PI * 2,
+      vx: -0.012,            // 左へ進む（元画像が左向きなので自然）
+      waveSpeed: 0.12,
+      waveAmpHead: 0.01,
+      waveAmpTail: 0.18,     // 尾の振幅（メートル単位、0.18m = 18cm 相当）
+    };
+
+    function setState(newState) {
+      if (fishState.state === newState) return;
+      fishState.state = newState;
+      console.log('[Fish] state ->', newState);
+      switch (newState) {
+        case 'approach':
+          fishState.waveSpeed = 0.22;
+          fishState.waveAmpTail = 0.28;
+          break;
+        case 'speak':
+          fishState.waveSpeed = 0.06;
+          fishState.waveAmpTail = 0.06;
+          break;
+        case 'leave':
+          fishState.waveSpeed = 0.16;
+          fishState.waveAmpTail = 0.20;
+          break;
+        default:
+          fishState.waveSpeed = 0.12;
+          fishState.waveAmpTail = 0.18;
+      }
+    }
+    // DevTools コンソールから aquarium.test('approach') と叩けるよう公開
+    window.aquarium = { onEvent: setState, test: setState };
+
+    // =============================================================
+    // 7) 毎フレーム更新ループ
+    // =============================================================
+    const clock = new THREE.Clock();
+    function tick() {
+      const dt = clock.getDelta();
+      const t = clock.getElapsedTime();
+
+      // --- 背景の時間を進める ---
+      bgMat.uniforms.uTime.value = t;
+
+      // --- 魚の位置 ---
+      fish.position.x += fishState.vx;
+      // 端で折り返し
+      if (fish.position.x < -3.5 && fishState.vx < 0) fishState.vx = Math.abs(fishState.vx);
+      if (fish.position.x >  3.5 && fishState.vx > 0) fishState.vx = -Math.abs(fishState.vx);
+      // 上下のふわふわ
+      fishState.bobPhase += dt * 1.2;
+      fish.position.y = Math.sin(fishState.bobPhase) * 0.25;
+      // 奥行き：sin で滑らかに z 軸を行き来（手前に来ると遠近で大きく見える）
+      fish.position.z = Math.sin(t * 0.4) * 1.8;
+
+      // 進行方向に応じて画像を反転（元画像が左向きのため）
+      fish.scale.x = fishState.vx <= 0 ? 1 : -1;
+
+      // --- メッシュ変形（しなる泳ぎ） ---
+      fishState.tailPhase += fishState.waveSpeed;
+      for (let i = 0; i < posAttr.count; i++) {
+        const x = baseX[i];
+        // x を 0..1 に正規化（0:頭(左) 1:尾(右)）
+        const tNorm = (x + fishW / 2) / fishW;
+        const amp = fishState.waveAmpHead + (fishState.waveAmpTail - fishState.waveAmpHead) * tNorm;
+        const yOffset = Math.sin(fishState.tailPhase + tNorm * Math.PI * 1.6) * amp;
+        posAttr.setY(i, baseY[i] + yOffset);
+      }
+      posAttr.needsUpdate = true;
+
+      // --- 気泡を上昇させる ---
+      bubbleGroup.children.forEach((b, i) => {
+        b.position.y += b.userData.speed;
+        b.position.x += Math.sin(t * 2 + b.userData.drift) * 0.002;
+        if (b.position.y > 4) {
+          b.position.y = -4;
+          b.position.x = (Math.random() - 0.5) * 12;
+        }
+      });
+
+      // --- 水草の揺れ ---
+      plants.forEach((p) => {
+        p.position.x = p.userData.baseX + Math.sin(t * 0.6 + p.userData.swayPhase) * 0.08;
+      });
+
+      renderer.render(scene, camera);
+      requestAnimationFrame(tick);
+    }
+    tick();
+
+    // =============================================================
+    // 8) ウィンドウリサイズ追従
+    // =============================================================
+    addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+  </script>
+</body>
+</html>

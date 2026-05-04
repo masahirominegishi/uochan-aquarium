@@ -1,0 +1,26 @@
+{
+  "canvas_width": 800,
+  "canvas_height": 800,
+  "facing": "left",
+  "display_width": 280,
+  "comment": "うおちゃんパーツ定義。pivot は 800x800 キャンバス内座標(画像左上原点)。z 値が小さいほど奥(先に描画)。",
+  "parts": [
+    { "name": "leg_r",   "z": 1, "image": "leg_r",        "pivot": [560, 300], "anim": "swing", "swing_amp_deg": 22, "swing_speed": 0.18, "phase": 0.0 },
+    { "name": "arm_r",   "z": 2, "image": "arm_r",        "pivot": [380, 280], "anim": "swing", "swing_amp_deg": 26, "swing_speed": 0.18, "phase": 3.14 },
+    { "name": "body",    "z": 3, "image": "body",         "pivot": [400, 400], "anim": "spine", "wave_amp_head": 1, "wave_amp_tail": 16, "wave_speed": 0.18 },
+    { "name": "head",    "z": 4, "image": "head",         "pivot": [300, 380], "anim": "follow", "follow_amp": 4, "follow_speed": 0.04 },
+    { "name": "eye",     "z": 5, "image": "eye_open",     "pivot": [270, 340], "anim": "frames",
+      "frames": { "open": "eye_open", "half": "eye_half", "closed": "eye_closed" },
+      "default": "open",
+      "blink": { "interval_min": 3.0, "interval_max": 7.0 }
+    },
+    { "name": "mouth",   "z": 6, "image": "mouth_closed", "pivot": [150, 420], "anim": "frames",
+      "frames": { "closed": "mouth_closed", "half": "mouth_half", "open": "mouth_open" },
+      "default": "closed",
+      "speak_cycle": ["closed", "half", "open", "half"],
+      "speak_step_ms": 130
+    },
+    { "name": "leg_l",   "z": 7, "image": "leg_l",        "pivot": [560, 500], "anim": "swing", "swing_amp_deg": 22, "swing_speed": 0.18, "phase": 3.14 },
+    { "name": "arm_l",   "z": 8, "image": "arm_l",        "pivot": [380, 520], "anim": "swing", "swing_amp_deg": 26, "swing_speed": 0.18, "phase": 0.0 }
+  ]
+}

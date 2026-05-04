@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>Virtual Aquarium</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <style>
+    /* 全画面でキャンバスを表示するためのリセット */
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;            /* スクロールバーを出さない */
+      background: #000;            /* 描画前の背景 */
+      width: 100%;
+      height: 100%;
+    }
+    /* p5.js が生成する <canvas> をピッタリ全画面に */
+    canvas {
+      display: block;
+    }
+    /* フルスクリーン誘導ボタン（最初の1クリックでブラウザにフルスクリーン化を依頼） */
+    #fs-btn {
+      position: fixed;
+      right: 12px;
+      bottom: 12px;
+      padding: 8px 12px;
+      font-size: 12px;
+      color: #fff;
+      background: rgba(0,0,0,0.4);
+      border: 1px solid rgba(255,255,255,0.4);
+      border-radius: 6px;
+      cursor: pointer;
+      z-index: 10;
+      font-family: sans-serif;
+    }
+    #fs-btn:hover { background: rgba(0,0,0,0.7); }
+    /* テストパネル: 状態切替ボタン群。? キーで表示/非表示トグル */
+    #test-panel {
+      position: fixed;
+      right: 12px;
+      bottom: 56px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      z-index: 10;
+      font-family: sans-serif;
+    }
+    #test-panel button {
+      padding: 6px 10px;
+      font-size: 12px;
+      color: #fff;
+      background: rgba(0,0,0,0.4);
+      border: 1px solid rgba(255,255,255,0.4);
+      border-radius: 6px;
+      cursor: pointer;
+      min-width: 110px;
+      text-align: left;
+    }
+    #test-panel button:hover { background: rgba(0,0,0,0.7); }
+    #test-panel.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <!-- p5.js 本体（CDN から読み込み。オフライン運用したくなったらローカル配置に切替可能） -->
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.9.4/lib/p5.min.js"></script>
+
+  <!-- 自作ファイル：順番が重要。Fish クラスを先に読み込み、最後に sketch.js -->
+  <script src="fish.js"></script>
+  <script src="sketch.js"></script>
+  <!-- pi-main 上のブリッジ (uochan-aquarium.service) と接続して onEvent を駆動 -->
+  <script src="ws-client.js"></script>
+
+  <!-- テスト用ボタン群（? キーで表示/非表示トグル） -->
+  <div id="test-panel">
+    <button onclick="aquarium.test('idle')">😐 idle</button>
+    <button onclick="aquarium.test('approach')">🏃 approach</button>
+    <button onclick="aquarium.test('speak')">💬 speak (口パク)</button>
+    <button onclick="aquarium.test('leave')">👋 leave</button>
+  </div>
+
+  <!-- フルスクリーン化ボタン（ブラウザの仕様で「ユーザー操作」が必要なため） -->
+  <button id="fs-btn" onclick="document.documentElement.requestFullscreen()">⛶ フルスクリーン</button>
+
+  <script>
+    // ? キーでテストパネルの表示/非表示をトグル
+    document.addEventListener('keydown', (e) => {
+      if (e.key === '?') {
+        document.getElementById('test-panel').classList.toggle('hidden');
+      }
+    });
+  </script>
+</body>
+</html>

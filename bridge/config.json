@@ -1,0 +1,19 @@
+{
+  "_comment": "aquarium_bridge.py の設定。環境変数で個別キーを上書き可能 (例: AQUARIUM_WS_PORT)。",
+  "ws": {
+    "host": "0.0.0.0",
+    "port": 8765
+  },
+  "zone_state_path": "/home/mine/Documents/fish_ai_realtime/zone_state.json",
+  "aquarium_event_path": "/home/mine/Documents/fish_ai_realtime/aquarium_event.json",
+  "aquarium": {
+    "zone_id": "zone_003",
+    "owner_person_id": "001",
+    "speak_dwell_sec": 5.0,
+    "leave_linger_sec": 1.0
+  },
+  "logging": {
+    "level": "INFO",
+    "comment": "DEBUG / INFO / WARNING / ERROR が指定可能。systemd 配下では journalctl -p で絞り込みできる"
+  }
+}

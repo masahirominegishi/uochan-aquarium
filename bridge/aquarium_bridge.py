@@ -1,0 +1,265 @@
+"""Aquarium WebSocket bridge.
+
+fish_ai_realtime が書く 2 ファイルを inotify で見張り、水槽 UI 向けのイベントに
+翻訳して WebSocket で配信する。
+
+監視対象:
+  zone_state.json      : カメラ由来 (active_zone, recognized_person_id)
+  aquarium_event.json  : realtime_loop 由来 (ai_state)
+
+イベント設計:
+  [zone 由来]
+    active_zone == "zone_003" 進入       → approach (owner フラグ付き)
+    zone_003 に SPEAK_DWELL_SEC 滞在     → speak (1 訪問につき 1 回)
+    zone_003 → 別ゾーン or null          → leave、その後 idle に収束
+    それ以外                             → idle
+  [aquarium_event 由来]
+    ai_state: idle → speaking            → ai_speak_start
+    ai_state: speaking → idle            → ai_speak_end
+
+ブラウザ側 (sketch.js) で zone と AI の状態を分離して扱い、
+AI 発話中は zone 状態に関わらず口パクが優先される。
+"""
+
+import asyncio
+import json
+import logging
+import os
+import time
+from pathlib import Path
+
+import websockets
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
+
+# ─── 設定読み込み ─────────────────────────────────────────
+# 同梱の config.json を初期値に、環境変数 (AQUARIUM_*) で個別キーを上書き可能。
+CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
+
+
+def _load_config():
+    try:
+        with CONFIG_PATH.open() as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+_cfg = _load_config()
+
+ZONE_STATE_FILE = Path(
+    os.environ.get("AQUARIUM_ZONE_STATE", _cfg.get("zone_state_path", ""))
+)
+AQUARIUM_EVENT_FILE = Path(
+    os.environ.get("AQUARIUM_EVENT_PATH", _cfg.get("aquarium_event_path", ""))
+)
+WS_HOST = os.environ.get("AQUARIUM_WS_HOST", _cfg.get("ws", {}).get("host", "0.0.0.0"))
+WS_PORT = int(os.environ.get("AQUARIUM_WS_PORT", _cfg.get("ws", {}).get("port", 8765)))
+AQUARIUM_ZONE_ID = os.environ.get(
+    "AQUARIUM_ZONE_ID", _cfg.get("aquarium", {}).get("zone_id", "zone_003")
+)
+OWNER_PERSON_ID = os.environ.get(
+    "AQUARIUM_OWNER_ID", _cfg.get("aquarium", {}).get("owner_person_id", "001")
+)
+SPEAK_DWELL_SEC = float(
+    os.environ.get(
+        "AQUARIUM_SPEAK_DWELL_SEC", _cfg.get("aquarium", {}).get("speak_dwell_sec", 5.0)
+    )
+)
+LEAVE_LINGER_SEC = float(
+    os.environ.get(
+        "AQUARIUM_LEAVE_LINGER_SEC",
+        _cfg.get("aquarium", {}).get("leave_linger_sec", 1.0),
+    )
+)
+
+# ─── ロギング ────────────────────────────────────────────
+_log_level = os.environ.get(
+    "AQUARIUM_LOG_LEVEL", _cfg.get("logging", {}).get("level", "INFO")
+).upper()
+logging.basicConfig(
+    level=getattr(logging, _log_level, logging.INFO),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("bridge")
+
+# zone-based 状態 (カメラ由来イベントの追跡)
+zone_tracker = {
+    "current_event": "idle",
+    "in_zone_since": None,
+    "speak_emitted": False,
+    "owner_latched": False,
+    "left_at": None,
+}
+
+# AI 発話状態 (aquarium_event.json 由来)
+ai_tracker = {
+    "is_speaking": False,
+}
+
+clients: set = set()
+
+
+def _load_json(path):
+    try:
+        with path.open() as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def compute_zone_event(zs):
+    """zone_state.json の内容から zone 由来イベントを返す。"""
+    now = time.time()
+    active_zone = (zs or {}).get("active_zone")
+    person_id = (zs or {}).get("recognized_person_id")
+    is_owner = person_id == OWNER_PERSON_ID
+    in_aquarium = active_zone == AQUARIUM_ZONE_ID
+
+    t = zone_tracker
+    if in_aquarium:
+        if t["in_zone_since"] is None:
+            t["in_zone_since"] = now
+            t["speak_emitted"] = False
+            t["owner_latched"] = is_owner
+            t["left_at"] = None
+            return ("approach", {"owner": is_owner})
+        if is_owner and not t["owner_latched"]:
+            t["owner_latched"] = True
+        dwell = now - t["in_zone_since"]
+        if dwell >= SPEAK_DWELL_SEC and not t["speak_emitted"]:
+            t["speak_emitted"] = True
+            return ("speak", {"owner": t["owner_latched"]})
+        return (None, None)
+
+    if t["in_zone_since"] is not None:
+        owner = t["owner_latched"]
+        t["in_zone_since"] = None
+        t["speak_emitted"] = False
+        t["owner_latched"] = False
+        t["left_at"] = now
+        return ("leave", {"owner": owner})
+
+    if t["left_at"] is not None and (now - t["left_at"]) >= LEAVE_LINGER_SEC:
+        t["left_at"] = None
+        if t["current_event"] != "idle":
+            return ("idle", {})
+        return (None, None)
+
+    if t["left_at"] is None and t["current_event"] != "idle":
+        return ("idle", {})
+
+    return (None, None)
+
+
+def compute_ai_event(ae):
+    """aquarium_event.json の内容から AI 由来イベントを返す。"""
+    is_speaking = (ae or {}).get("ai_state") == "speaking"
+    if is_speaking != ai_tracker["is_speaking"]:
+        ai_tracker["is_speaking"] = is_speaking
+        return ("ai_speak_start" if is_speaking else "ai_speak_end", {})
+    return (None, None)
+
+
+async def broadcast(event_type, payload):
+    if not clients:
+        return
+    message = json.dumps({"type": event_type, "payload": payload})
+    websockets.broadcast(clients, message)
+
+
+async def evaluate_and_emit():
+    """両ファイルを読み、変化があったイベントを送信する。"""
+    zs = _load_json(ZONE_STATE_FILE)
+    zone_type, zone_payload = compute_zone_event(zs)
+    if zone_type is not None:
+        zone_tracker["current_event"] = zone_type
+        log.info("zone -> %s %s", zone_type, zone_payload)
+        await broadcast(zone_type, zone_payload)
+
+    ae = _load_json(AQUARIUM_EVENT_FILE)
+    ai_type, ai_payload = compute_ai_event(ae)
+    if ai_type is not None:
+        log.info("ai -> %s %s", ai_type, ai_payload)
+        await broadcast(ai_type, ai_payload)
+
+
+class FilesHandler(FileSystemEventHandler):
+    """zone_state.json または aquarium_event.json の変更を検知して再評価をキック。"""
+
+    def __init__(self, loop):
+        self.loop = loop
+        self._targets = {ZONE_STATE_FILE.resolve(), AQUARIUM_EVENT_FILE.resolve()}
+
+    def _is_target(self, path_str):
+        try:
+            return Path(path_str).resolve() in self._targets
+        except OSError:
+            return False
+
+    def _kick(self):
+        asyncio.run_coroutine_threadsafe(evaluate_and_emit(), self.loop)
+
+    def on_modified(self, event):
+        if not event.is_directory and self._is_target(event.src_path):
+            self._kick()
+
+    def on_created(self, event):
+        if not event.is_directory and self._is_target(event.src_path):
+            self._kick()
+
+    def on_moved(self, event):
+        dest = getattr(event, "dest_path", None)
+        if dest and self._is_target(dest):
+            self._kick()
+
+
+async def ws_handler(websocket):
+    clients.add(websocket)
+    log.info("client connected (%d total)", len(clients))
+    try:
+        # 接続直後: 現在の zone state と (もし speaking 中なら) ai_speak_start を送る
+        await websocket.send(
+            json.dumps({"type": zone_tracker["current_event"], "payload": {}})
+        )
+        if ai_tracker["is_speaking"]:
+            await websocket.send(
+                json.dumps({"type": "ai_speak_start", "payload": {}})
+            )
+        async for _ in websocket:
+            pass
+    except Exception:
+        log.exception("ws_handler error")
+    finally:
+        clients.discard(websocket)
+        log.info("client disconnected (%d total)", len(clients))
+
+
+async def periodic_tick():
+    """ファイル変更のないままドゥエル経過するケースを拾うための周期再評価。"""
+    while True:
+        await asyncio.sleep(1.0)
+        await evaluate_and_emit()
+
+
+async def main():
+    loop = asyncio.get_running_loop()
+    observer = Observer()
+    # 両ファイルが同じ親ディレクトリ (fish_ai_realtime) なので 1 回 schedule で OK
+    observer.schedule(FilesHandler(loop), str(ZONE_STATE_FILE.parent), recursive=False)
+    observer.start()
+    try:
+        async with websockets.serve(ws_handler, WS_HOST, WS_PORT):
+            log.info("WebSocket listening on ws://%s:%d", WS_HOST, WS_PORT)
+            log.info("watching %s", ZONE_STATE_FILE)
+            log.info("watching %s", AQUARIUM_EVENT_FILE)
+            await periodic_tick()
+    finally:
+        observer.stop()
+        observer.join()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
