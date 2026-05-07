@@ -235,3 +235,77 @@ class Fish {
     if (img) image(img, 0, 0);
   }
 }
+
+// =============================================================
+// GuestFish クラス: お客さんがアップロードした 1 枚画像を泳がせる
+//
+// 既存 Fish の `_drawSpine` (縦スライス変形) を流用する単機能版。
+// 状態機械なし、常時 swim。背景除去済みの透過 PNG が前提。
+// =============================================================
+
+class GuestFish {
+  constructor(image, options = {}) {
+    this.image = image;                      // p5.Image (背景除去済)
+    this.id = options.id || `guest_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+
+    // 表示サイズ: 長辺を targetSize に揃える
+    const targetSize = options.targetSize || 200;
+    const longest = Math.max(image.width, image.height);
+    this.scale = targetSize / longest;
+
+    // 初期位置と速度
+    this.x = options.x !== undefined ? options.x : random(width * 0.2, width * 0.8);
+    this.y = options.y !== undefined ? options.y : random(height * 0.3, height * 0.7);
+    const speed = options.speed || random(0.4, 0.9);
+    this.vx = (random() < 0.5 ? -1 : 1) * speed;
+
+    // アニメ位相 (個体差のため初期値ランダム)
+    this.tailPhase = random(TWO_PI);
+    this.bobPhase = random(TWO_PI);
+
+    // スライス設定 (Fish._drawSpine と同等)
+    this.strips = options.strips || 22;
+    this.waveAmpHead = options.waveAmpHead || 1;
+    this.waveAmpTail = options.waveAmpTail || 14;
+    this.waveSpeed = options.waveSpeed || 0.16;
+  }
+
+  update() {
+    this.tailPhase += this.waveSpeed;
+    this.bobPhase += 0.02;
+
+    this.x += this.vx;
+
+    const halfW = this.image.width * this.scale * 0.5;
+    if (this.x < halfW && this.vx < 0) this.vx = Math.abs(this.vx);
+    if (this.x > width - halfW && this.vx > 0) this.vx = -Math.abs(this.vx);
+
+    this.y += sin(this.bobPhase) * 0.4;
+  }
+
+  draw() {
+    push();
+    translate(this.x, this.y);
+
+    // 進行方向に合わせて水平反転 (画像はどちら向きでも、進行方向に頭が向くようにする)
+    // ここでは「画像は左向き」と仮定。vx > 0 のときは反転して右向きにする。
+    const flip = this.vx > 0 ? -1 : 1;
+    scale(flip * this.scale, this.scale);
+
+    // 画像中心を fish の位置に揃える
+    translate(-this.image.width / 2, -this.image.height / 2);
+
+    // 縦スライス変形 (Fish._drawSpine と同じ式)
+    const stripW = this.image.width / this.strips;
+    for (let i = 0; i < this.strips; i++) {
+      const t = i / (this.strips - 1);
+      const amp = lerp(this.waveAmpHead, this.waveAmpTail, t);
+      const yOff = sin(this.tailPhase + t * PI * 1.6) * amp;
+      const sx = i * stripW;
+      const sw = stripW + 1;
+      image(this.image, sx, yOff, sw, this.image.height, sx, 0, sw, this.image.height);
+    }
+
+    pop();
+  }
+}

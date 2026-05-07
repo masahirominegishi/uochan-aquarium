@@ -1,0 +1,25 @@
+{
+  "_comment": "upload_server.py の設定。環境変数 (AQUARIUM_WEB_*) で個別キーを上書き可能。パスは web/ ディレクトリ基準の相対パスで解決される。",
+  "http": {
+    "host": "0.0.0.0",
+    "port": 8080
+  },
+  "static_root": "..",
+  "guest_fish_dir": "../guest_fish",
+  "guest_fish_path": "../guest_fish.json",
+  "background_removal": {
+    "value_threshold": 240,
+    "saturation_threshold": 30,
+    "_comment": "HSV で V >= value_threshold かつ S <= saturation_threshold のピクセルを透明化"
+  },
+  "output": {
+    "long_edge": 600
+  },
+  "upload": {
+    "max_bytes": 26214400,
+    "_comment": "26214400 = 25MB"
+  },
+  "logging": {
+    "level": "INFO"
+  }
+}

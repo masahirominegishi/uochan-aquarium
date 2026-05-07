@@ -1,11 +1,12 @@
 """Aquarium WebSocket bridge.
 
-fish_ai_realtime が書く 2 ファイルを inotify で見張り、水槽 UI 向けのイベントに
-翻訳して WebSocket で配信する。
+fish_ai_realtime と upload_server が書く 3 ファイルを inotify で見張り、
+水槽 UI 向けのイベントに翻訳して WebSocket で配信する。
 
 監視対象:
   zone_state.json      : カメラ由来 (active_zone, recognized_person_id)
   aquarium_event.json  : realtime_loop 由来 (ai_state)
+  guest_fish.json      : upload_server 由来 (お客さんがアップロードした魚)
 
 イベント設計:
   [zone 由来]
@@ -16,6 +17,9 @@ fish_ai_realtime が書く 2 ファイルを inotify で見張り、水槽 UI �
   [aquarium_event 由来]
     ai_state: idle → speaking            → ai_speak_start
     ai_state: speaking → idle            → ai_speak_end
+  [guest_fish 由来]
+    fishes 配列に新規 ID 出現            → fish_added (id, image_url)
+    クライアント接続時の welcome         → 既存全ての fish_added を送信
 
 ブラウザ側 (sketch.js) で zone と AI の状態を分離して扱い、
 AI 発話中は zone 状態に関わらず口パクが優先される。
@@ -53,6 +57,13 @@ ZONE_STATE_FILE = Path(
 )
 AQUARIUM_EVENT_FILE = Path(
     os.environ.get("AQUARIUM_EVENT_PATH", _cfg.get("aquarium_event_path", ""))
+)
+_guest_fish_path_str = os.environ.get(
+    "AQUARIUM_GUEST_FISH_PATH", _cfg.get("guest_fish_path", "")
+)
+GUEST_FISH_FILE = Path(_guest_fish_path_str) if _guest_fish_path_str else None
+GUEST_FISH_URL_PREFIX = os.environ.get(
+    "AQUARIUM_GUEST_FISH_URL_PREFIX", _cfg.get("guest_fish_url_prefix", "/guest_fish")
 )
 WS_HOST = os.environ.get("AQUARIUM_WS_HOST", _cfg.get("ws", {}).get("host", "0.0.0.0"))
 WS_PORT = int(os.environ.get("AQUARIUM_WS_PORT", _cfg.get("ws", {}).get("port", 8765)))
@@ -97,6 +108,11 @@ zone_tracker = {
 # AI 発話状態 (aquarium_event.json 由来)
 ai_tracker = {
     "is_speaking": False,
+}
+
+# ゲスト魚追跡 (guest_fish.json 由来、broadcast 済み ID を覚える)
+guest_fish_tracker = {
+    "known_ids": set(),
 }
 
 clients: set = set()
@@ -163,6 +179,27 @@ def compute_ai_event(ae):
     return (None, None)
 
 
+def _fish_to_payload(fish):
+    """guest_fish.json の 1 エントリを WebSocket 配信用 payload に変換。"""
+    return {
+        "id": fish["id"],
+        "image_url": f"{GUEST_FISH_URL_PREFIX}/{fish['image']}",
+    }
+
+
+def compute_new_guest_fish_events(gf):
+    """guest_fish.json の内容から、まだ broadcast していない fish_added イベントを返す。"""
+    fishes = (gf or {}).get("fishes", []) or []
+    events = []
+    for f in fishes:
+        fid = f.get("id")
+        if not fid or fid in guest_fish_tracker["known_ids"]:
+            continue
+        guest_fish_tracker["known_ids"].add(fid)
+        events.append(_fish_to_payload(f))
+    return events
+
+
 async def broadcast(event_type, payload):
     if not clients:
         return
@@ -171,7 +208,7 @@ async def broadcast(event_type, payload):
 
 
 async def evaluate_and_emit():
-    """両ファイルを読み、変化があったイベントを送信する。"""
+    """全監視ファイルを読み、変化があったイベントを送信する。"""
     zs = _load_json(ZONE_STATE_FILE)
     zone_type, zone_payload = compute_zone_event(zs)
     if zone_type is not None:
@@ -185,13 +222,25 @@ async def evaluate_and_emit():
         log.info("ai -> %s %s", ai_type, ai_payload)
         await broadcast(ai_type, ai_payload)
 
+    if GUEST_FISH_FILE is not None:
+        gf = _load_json(GUEST_FISH_FILE)
+        for payload in compute_new_guest_fish_events(gf):
+            log.info("guest fish -> %s", payload)
+            await broadcast("fish_added", payload)
+
 
 class FilesHandler(FileSystemEventHandler):
     """zone_state.json または aquarium_event.json の変更を検知して再評価をキック。"""
 
     def __init__(self, loop):
         self.loop = loop
-        self._targets = {ZONE_STATE_FILE.resolve(), AQUARIUM_EVENT_FILE.resolve()}
+        targets = {ZONE_STATE_FILE.resolve(), AQUARIUM_EVENT_FILE.resolve()}
+        if GUEST_FISH_FILE is not None:
+            try:
+                targets.add(GUEST_FISH_FILE.resolve())
+            except OSError:
+                pass
+        self._targets = targets
 
     def _is_target(self, path_str):
         try:
@@ -228,6 +277,15 @@ async def ws_handler(websocket):
             await websocket.send(
                 json.dumps({"type": "ai_speak_start", "payload": {}})
             )
+        # 既存のゲスト魚を全て fish_added として送る (新規クライアント向けの初期同期)
+        if GUEST_FISH_FILE is not None:
+            gf = _load_json(GUEST_FISH_FILE)
+            for fish in (gf or {}).get("fishes", []) or []:
+                if not fish.get("id"):
+                    continue
+                await websocket.send(
+                    json.dumps({"type": "fish_added", "payload": _fish_to_payload(fish)})
+                )
         async for _ in websocket:
             pass
     except Exception:
@@ -247,14 +305,24 @@ async def periodic_tick():
 async def main():
     loop = asyncio.get_running_loop()
     observer = Observer()
-    # 両ファイルが同じ親ディレクトリ (fish_ai_realtime) なので 1 回 schedule で OK
-    observer.schedule(FilesHandler(loop), str(ZONE_STATE_FILE.parent), recursive=False)
+    handler = FilesHandler(loop)
+    # zone_state と aquarium_event は同じディレクトリ (fish_ai_realtime)
+    observer.schedule(handler, str(ZONE_STATE_FILE.parent), recursive=False)
+    # guest_fish.json は別ディレクトリ (~/Documents/aquarium/) なので追加 schedule
+    if (
+        GUEST_FISH_FILE is not None
+        and GUEST_FISH_FILE.parent != ZONE_STATE_FILE.parent
+    ):
+        GUEST_FISH_FILE.parent.mkdir(parents=True, exist_ok=True)
+        observer.schedule(handler, str(GUEST_FISH_FILE.parent), recursive=False)
     observer.start()
     try:
         async with websockets.serve(ws_handler, WS_HOST, WS_PORT):
             log.info("WebSocket listening on ws://%s:%d", WS_HOST, WS_PORT)
             log.info("watching %s", ZONE_STATE_FILE)
             log.info("watching %s", AQUARIUM_EVENT_FILE)
+            if GUEST_FISH_FILE is not None:
+                log.info("watching %s", GUEST_FISH_FILE)
             await periodic_tick()
     finally:
         observer.stop()

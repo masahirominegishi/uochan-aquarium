@@ -15,7 +15,8 @@
 // =============================================================
 
 // ---- グローバル変数 ----
-let fish;            // 魚インスタンス（後で複数匹に拡張可能）
+let mainFish;        // うおちゃん本体 (Fish インスタンス)
+let guestFishes = [];// お客さんがアップロードした魚 (GuestFish インスタンスの配列)
 let bubbles = [];    // 気泡たち
 let plants  = [];    // 水草の位置情報
 let partsConfig;     // assets/uochan/parts.json
@@ -49,8 +50,8 @@ function setup() {
   // 楕円の中心を「左上」ではなく「中央」基準にする（魚の描画を素直に書きたいので）
   ellipseMode(CENTER);
 
-  // パーツリギングで魚を 1 匹作成
-  fish = new Fish(parts, partsConfig);
+  // パーツリギングでうおちゃん本体を作成
+  mainFish = new Fish(parts, partsConfig);
 
   // 気泡を初期配置（最初から画面に少しある状態にしたい）
   for (let i = 0; i < 12; i++) {
@@ -92,9 +93,13 @@ function draw() {
   // 4) 気泡を更新＆描画
   _updateAndDrawBubbles();
 
-  // 5) 魚を更新＆描画
-  fish.update();
-  fish.draw();
+  // 5) 魚を更新＆描画 (うおちゃん本体 + ゲスト魚たち)
+  mainFish.update();
+  mainFish.draw();
+  for (const g of guestFishes) {
+    g.update();
+    g.draw();
+  }
 
   // 6) 手前側の水草（魚より前に描いてパララックス感を出す）
   _drawPlants(false);
@@ -239,6 +244,10 @@ window.aquarium = {
       case 'ai_speak_end':
         _aiSpeaking = false;
         break;
+      case 'fish_added':
+        // 接続時の初期同期 + 新規アップロード時に bridge から飛んでくる
+        this.addGuestFish(payload.image_url, { id: payload.id });
+        return;  // _apply() は不要 (うおちゃん本体の状態は変わらない)
       default:
         console.warn('[aquarium] unknown event type:', type);
         return;
@@ -248,10 +257,31 @@ window.aquarium = {
 
   _apply() {
     const next = _aiSpeaking ? 'speak' : _zoneState;
-    fish.setState(next);
+    mainFish.setState(next);
   },
 
   // 動作確認用：ブラウザの DevTools コンソールから手で叩けるようにしておく
   //   例：aquarium.test('approach')
   test(type) { this.onEvent(type); },
+
+  // ゲスト魚を追加 (ws-client.js から呼ばれる)
+  // imageUrl から非同期に画像を読み込み、GuestFish として guestFishes 配列に push
+  addGuestFish(imageUrl, options = {}) {
+    loadImage(
+      imageUrl,
+      (img) => {
+        const fish = new GuestFish(img, options);
+        guestFishes.push(fish);
+        console.log(`[aquarium] guest fish added: ${fish.id} (total ${guestFishes.length})`);
+      },
+      (err) => {
+        console.warn(`[aquarium] failed to load guest fish image: ${imageUrl}`, err);
+      }
+    );
+  },
+
+  // テスト用: うおちゃんの body 画像を流用してゲスト魚を 1 匹追加
+  testAddGuest() {
+    this.addGuestFish('assets/uochan/body.png');
+  },
 };

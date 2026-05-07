@@ -1,0 +1,18 @@
+[Unit]
+Description=Aquarium upload server (HTTP + image upload, port 8080)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mine
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/home/mine/Documents/aquarium/web
+ExecStart=/home/mine/Documents/fish_ai_realtime/.venv/bin/python /home/mine/Documents/aquarium/web/upload_server.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
