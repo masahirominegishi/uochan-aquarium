@@ -23,13 +23,13 @@ import json
 import logging
 import os
 import re
-import secrets
 import time
 from pathlib import Path
 
-import numpy as np
 from aiohttp import web
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image
+
+from guest_fish_pipeline import append_fish, new_fish_id, remove_white_background
 
 
 # ─── 設定 ─────────────────────────────────────────────
@@ -100,89 +100,6 @@ logging.basicConfig(
 log = logging.getLogger("upload_server")
 
 
-# ─── 背景除去 ──────────────────────────────────────────
-def _edge_connected_bg_mask(bg_candidate: np.ndarray) -> np.ndarray:
-    """画像の縁から到達できる白領域のみを背景とみなして mask を返す。
-
-    bg_candidate は「色的には白っぽい」全ピクセルの bool 配列。これをそのまま
-    透明化すると魚の中の白 (目玉・お腹等) も消えてしまうので、画像の縁に接して
-    いる連結成分のみを抽出する (flood fill from edges)。
-    """
-    h, w = bg_candidate.shape
-    # 0 = 描画 / 255 = 白っぽい候補ピクセル
-    mask_pil = Image.fromarray(np.where(bg_candidate, 255, 0).astype(np.uint8), mode="L")
-    # 1 px の白縁を足す。flood fill (0,0) からその縁を通ってあらゆる端の白に到達できる。
-    bordered = Image.new("L", (w + 2, h + 2), 255)
-    bordered.paste(mask_pil, (1, 1))
-    # (0,0) から flood fill し、到達白を 128 に塗る (描画ピクセル 0 はブロックされる)
-    ImageDraw.floodfill(bordered, (0, 0), 128, thresh=0)
-    arr = np.asarray(bordered)[1:-1, 1:-1]
-    return arr == 128
-
-
-def remove_white_background(img: Image.Image) -> Image.Image:
-    """HSV で白っぽいピクセルを抽出 → 縁から繋がっている部分だけを透明化 → トリミング & 長辺リサイズ。"""
-    img = ImageOps.exif_transpose(img).convert("RGB")
-    arr = np.array(img).astype(np.float32)
-    r = arr[..., 0]
-    g = arr[..., 1]
-    b = arr[..., 2]
-    maxc = np.maximum(np.maximum(r, g), b)
-    minc = np.minimum(np.minimum(r, g), b)
-    v = maxc
-    s = np.where(maxc == 0, 0.0, (maxc - minc) / np.maximum(maxc, 1.0) * 255.0)
-    bg_candidate = (v >= V_THRESH) & (s <= S_THRESH)
-
-    # 縁から繋がっていない「魚の中の白」は残す
-    bg_mask = _edge_connected_bg_mask(bg_candidate)
-
-    rgba = np.dstack([arr.astype(np.uint8), np.full(arr.shape[:2], 255, dtype=np.uint8)])
-    rgba[bg_mask] = [0, 0, 0, 0]
-    out = Image.fromarray(rgba, "RGBA")
-
-    bbox = out.getbbox()
-    if bbox:
-        out = out.crop(bbox)
-
-    w, h = out.size
-    if max(w, h) > LONG_EDGE:
-        if w >= h:
-            new_size = (LONG_EDGE, max(1, int(h * LONG_EDGE / w)))
-        else:
-            new_size = (max(1, int(w * LONG_EDGE / h)), LONG_EDGE)
-        out = out.resize(new_size, Image.LANCZOS)
-
-    return out
-
-
-# ─── メタデータ I/O ────────────────────────────────────
-def _new_fish_id() -> str:
-    return f"{time.strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(3)}"
-
-
-def _load_metadata() -> dict:
-    if not GUEST_FISH_PATH.exists():
-        return {"fishes": []}
-    try:
-        with GUEST_FISH_PATH.open() as f:
-            data = json.load(f)
-            if not isinstance(data, dict) or not isinstance(data.get("fishes"), list):
-                return {"fishes": []}
-            return data
-    except (json.JSONDecodeError, OSError) as e:
-        log.warning("guest_fish.json 読み込み失敗、空で再開: %s", e)
-        return {"fishes": []}
-
-
-def _save_metadata(data: dict) -> None:
-    """atomic write (temp -> rename) で破損を防ぐ。"""
-    GUEST_FISH_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = GUEST_FISH_PATH.with_suffix(GUEST_FISH_PATH.suffix + ".tmp")
-    with tmp.open("w") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, GUEST_FISH_PATH)
-
-
 _metadata_lock = asyncio.Lock()
 
 
@@ -232,12 +149,20 @@ async def api_upload_handler(request: web.Request) -> web.Response:
 
     loop = asyncio.get_running_loop()
     try:
-        processed = await loop.run_in_executor(None, remove_white_background, img)
+        processed = await loop.run_in_executor(
+            None,
+            lambda: remove_white_background(
+                img,
+                v_thresh=V_THRESH,
+                s_thresh=S_THRESH,
+                long_edge=LONG_EDGE,
+            ),
+        )
     except Exception as e:
         log.exception("背景除去失敗")
         return web.json_response({"error": f"処理失敗: {e}"}, status=500)
 
-    fish_id = _new_fish_id()
+    fish_id = new_fish_id()
     out_name = f"{fish_id}.png"
     GUEST_FISH_DIR.mkdir(parents=True, exist_ok=True)
     out_path = GUEST_FISH_DIR / out_name
@@ -248,16 +173,7 @@ async def api_upload_handler(request: web.Request) -> web.Response:
         return web.json_response({"error": f"保存失敗: {e}"}, status=500)
 
     async with _metadata_lock:
-        data = _load_metadata()
-        data.setdefault("fishes", []).append(
-            {
-                "id": fish_id,
-                "image": out_name,
-                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                "owner_person_id": None,
-            }
-        )
-        _save_metadata(data)
+        append_fish(GUEST_FISH_PATH, fish_id, out_name)
 
     # Phase 1.5: realtime_loop に「飼い主登録しますか？」のトリガーを渡す。
     # 失敗してもアップロード自体は成功扱いにする (realtime_loop が落ちていても水槽には魚が出る)。
