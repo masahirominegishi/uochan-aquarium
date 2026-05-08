@@ -34,6 +34,37 @@ def _edge_connected_bg_mask(bg_candidate: np.ndarray) -> np.ndarray:
     return arr == 128
 
 
+def _white_paper_components_mask(
+    bg_candidate: np.ndarray,
+    *,
+    min_largest_ratio: float = 0.05,
+    min_each_ratio: float = 0.001,
+) -> np.ndarray:
+    """白っぽい候補のうち、紙の連結成分 (主要 + 細片) をすべて背景化するマスクを返す。
+
+    絵の黒い線で紙の白が複数の連結成分に分断されるケースが多いため、
+    「最大成分」だけでなく「画像全体の min_each_ratio 以上のサイズを持つ
+    すべての白成分」を紙の一部として背景化する。
+
+    魚の中の小さな白 (目玉等、min_each_ratio 未満) は対象外で残る。
+    最大成分が min_largest_ratio 未満の場合は紙が見つからないとみなして
+    空マスクを返す (誤検出回避)。
+    """
+    from scipy.ndimage import label
+    labeled, num = label(bg_candidate)
+    if num == 0:
+        return np.zeros_like(bg_candidate)
+    sizes = np.bincount(labeled.ravel())
+    sizes[0] = 0
+    largest_size = int(sizes.max())
+    h, w = bg_candidate.shape
+    if largest_size < int(h * w * min_largest_ratio):
+        return np.zeros_like(bg_candidate)
+    threshold_each = int(h * w * min_each_ratio)
+    paper_labels = np.where(sizes >= threshold_each)[0]
+    return np.isin(labeled, paper_labels)
+
+
 def _edge_connected_gray_mask(gray: np.ndarray, thresh: int) -> np.ndarray:
     """グレースケール画像の縁から色差 thresh 以内で連結する領域を返す。
 
@@ -55,20 +86,25 @@ def _edge_connected_gray_mask(gray: np.ndarray, thresh: int) -> np.ndarray:
 def remove_white_background(
     img: Image.Image,
     *,
-    v_thresh: int = 220,
+    v_thresh: int = 180,
     s_thresh: int = 60,
     paper_flood_thresh: int = 60,
+    paper_min_largest_ratio: float = 0.05,
+    paper_min_each_ratio: float = 0.001,
     long_edge: int = 600,
 ) -> Image.Image:
     """白っぽい紙 + 紙の外側の背景を透明化 → トリミング & 長辺リサイズ。
 
-    2 段階で背景を捕捉:
-      1) HSV 閾値で白っぽいピクセルを抽出し、縁から flood fill で繋がる白を透明化
-         (紙の中の白を残しつつ、紙の縁周辺の白を消す)
-      2) グレースケールで縁から色差 paper_flood_thresh 以内で flood fill
+    3 段階で背景を捕捉:
+      1) HSV 閾値で「白っぽいピクセル」候補を作る
+      2) 候補のうち、画像全体の paper_min_each_ratio 以上のサイズを持つ
+         連結成分すべてを紙の一部として背景化 (最大成分が
+         paper_min_largest_ratio 未満なら何もしない、誤検出回避)
+      3) 縁から繋がる白も背景化 (紙が画像の縁に接するケース)
+      4) グレースケールで縁から色差 paper_flood_thresh 以内で flood fill
          (紙の外側のテーブル等の色付き領域も透明化)
 
-      paper_flood_thresh=0 で 2) を無効化できる。
+      paper_flood_thresh=0 で 4) を無効化できる。
     """
     img = ImageOps.exif_transpose(img).convert("RGB")
     arr = np.array(img).astype(np.float32)
@@ -81,7 +117,13 @@ def remove_white_background(
     s = np.where(maxc == 0, 0.0, (maxc - minc) / np.maximum(maxc, 1.0) * 255.0)
     bg_candidate = (v >= v_thresh) & (s <= s_thresh)
 
-    bg_mask = _edge_connected_bg_mask(bg_candidate)
+    # 紙 (連結成分群) + 縁から繋がる白 を背景化
+    bg_mask = _white_paper_components_mask(
+        bg_candidate,
+        min_largest_ratio=paper_min_largest_ratio,
+        min_each_ratio=paper_min_each_ratio,
+    )
+    bg_mask = bg_mask | _edge_connected_bg_mask(bg_candidate)
 
     if paper_flood_thresh > 0:
         gray = (0.299 * r + 0.587 * g + 0.114 * b).astype(np.uint8)
