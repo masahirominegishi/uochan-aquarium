@@ -10,12 +10,9 @@
   "pending_owner_link_path": "/home/mine/Documents/fish_ai_realtime/pending_owner_link.json",
   "_pending_owner_link_comment": "Phase 1.5 (飼い主登録) で realtime_loop が読むトリガーファイル。upload_server から書く。Phase 2/3 では廃止予定",
   "background_removal": {
-    "value_threshold": 180,
-    "saturation_threshold": 60,
-    "paper_flood_thresh": 60,
-    "paper_min_largest_ratio": 0.05,
-    "paper_min_each_ratio": 0.001,
-    "_comment": "HSV (V/S) で白っぽい候補を作り、画像全体の paper_min_each_ratio 以上のサイズを持つ連結成分すべてを紙の一部として背景化 (最大成分が paper_min_largest_ratio 未満なら誤検出として何もしない)。さらに縁から繋がる白 + paper_flood_thresh の縁色差 flood fill (紙の外側のテーブル) も背景化。魚の中の目玉等は paper_min_each_ratio 未満なので残る"
+    "value_threshold": 200,
+    "saturation_threshold": 30,
+    "_comment": "HSV で V >= value_threshold かつ S <= saturation_threshold のピクセルを「白っぽい候補」とみなし、画像の縁から flood fill で繋がる部分のみを背景として透明化する。本番想定 (固定カメラ + 紙だけ撮影) で動くシンプル処理。魚の中の白 (目玉等) は縁から繋がらないので残る"
   },
   "output": {
     "long_edge": 600
