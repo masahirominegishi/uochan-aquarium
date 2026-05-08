@@ -257,6 +257,11 @@ window.aquarium = {
           if (g.id === payload.id) g.setOwnerPersonId(payload.owner_person_id);
         }
         return;
+      case 'fish_removed':
+        // 管理 UI から削除されたとき: guestFishes から該当魚を除去
+        guestFishes = guestFishes.filter((g) => g.id !== payload.id);
+        console.log(`[aquarium] guest fish removed: ${payload.id} (total ${guestFishes.length})`);
+        return;
       case 'fish_owner_present':
         // Phase 1.5: 飼い主候補が水槽前に来た / いなくなった
         // payload.fish_ids に入っているものだけ前面化、それ以外は解除

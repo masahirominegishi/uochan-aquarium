@@ -19,6 +19,8 @@ fish_ai_realtime と upload_server が書く 3 ファイルを inotify で見張
     ai_state: speaking → idle            → ai_speak_end
   [guest_fish 由来]
     fishes 配列に新規 ID 出現            → fish_added (id, image_url)
+    既存 ID の owner_person_id 変化      → fish_owner_updated (id, owner_person_id)
+    既存 ID が消失                       → fish_removed (id)
     クライアント接続時の welcome         → 既存全ての fish_added を送信
 
 ブラウザ側 (sketch.js) で zone と AI の状態を分離して扱い、
@@ -197,19 +199,25 @@ def _fish_to_payload(fish):
 
 
 def compute_guest_fish_events(gf):
-    """guest_fish.json から (新規 fish_added, owner 変更 fish_owner_updated) を返す。
+    """guest_fish.json から (added, updated, removed) を返す。
+
+    - added:   新規 fish_id (fish_added 配信用 payload)
+    - updated: 既存 fish_id の owner_person_id 変更 (fish_owner_updated 配信用)
+    - removed: 既存 fish_id が消失 (fish_removed 配信用 {id})
 
     Phase 1.5 で owner_by_id 追跡を追加: 既存 fish の owner_person_id が None → 設定値に
     変わったタイミングで fish_owner_updated を発火。realtime_loop の _link_fish_to_person
-    が guest_fish.json を書き換えると watchdog で再評価されてここを通る。
+    や app.py の管理 UI が guest_fish.json を書き換えると watchdog で再評価されてここを通る。
     """
     fishes = (gf or {}).get("fishes", []) or []
+    current_ids = set()
     added = []
     updated = []
     for f in fishes:
         fid = f.get("id")
         if not fid:
             continue
+        current_ids.add(fid)
         owner = f.get("owner_person_id")
         if fid not in guest_fish_tracker["known_ids"]:
             guest_fish_tracker["known_ids"].add(fid)
@@ -220,7 +228,12 @@ def compute_guest_fish_events(gf):
             if prev_owner != owner:
                 guest_fish_tracker["owner_by_id"][fid] = owner
                 updated.append({"id": fid, "owner_person_id": owner})
-    return added, updated
+    removed_ids = guest_fish_tracker["known_ids"] - current_ids
+    removed = [{"id": fid} for fid in removed_ids]
+    for fid in removed_ids:
+        guest_fish_tracker["known_ids"].discard(fid)
+        guest_fish_tracker["owner_by_id"].pop(fid, None)
+    return added, updated, removed
 
 
 def compute_owner_present_event(zs, gf):
@@ -265,13 +278,16 @@ async def evaluate_and_emit():
 
     if GUEST_FISH_FILE is not None:
         gf = _load_json(GUEST_FISH_FILE)
-        added, updated = compute_guest_fish_events(gf)
+        added, updated, removed = compute_guest_fish_events(gf)
         for payload in added:
             log.info("guest fish added -> %s", payload)
             await broadcast("fish_added", payload)
         for payload in updated:
             log.info("guest fish owner updated -> %s", payload)
             await broadcast("fish_owner_updated", payload)
+        for payload in removed:
+            log.info("guest fish removed -> %s", payload)
+            await broadcast("fish_removed", payload)
         # Phase 1.5: 顔認識 person_id 変化に追従して紐付き魚の前面化トリガー
         owner_event = compute_owner_present_event(zs, gf)
         if owner_event is not None:
