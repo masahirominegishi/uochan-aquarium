@@ -110,9 +110,17 @@ ai_tracker = {
     "is_speaking": False,
 }
 
-# ゲスト魚追跡 (guest_fish.json 由来、broadcast 済み ID を覚える)
+# ゲスト魚追跡 (guest_fish.json 由来、broadcast 済み ID と owner を覚える)
 guest_fish_tracker = {
     "known_ids": set(),
+    "owner_by_id": {},   # fish_id -> owner_person_id (or None)
+}
+
+# 顔認識 owner present 追跡 (Phase 1.5 再来訪演出)
+# zone_state.json の recognized_person_id が変化したら、
+# その person_id に紐付く fish_ids 一覧を fish_owner_present として配信する。
+owner_present_tracker = {
+    "current_person_id": None,
 }
 
 clients: set = set()
@@ -184,20 +192,53 @@ def _fish_to_payload(fish):
     return {
         "id": fish["id"],
         "image_url": f"{GUEST_FISH_URL_PREFIX}/{fish['image']}",
+        "owner_person_id": fish.get("owner_person_id"),
     }
 
 
-def compute_new_guest_fish_events(gf):
-    """guest_fish.json の内容から、まだ broadcast していない fish_added イベントを返す。"""
+def compute_guest_fish_events(gf):
+    """guest_fish.json から (新規 fish_added, owner 変更 fish_owner_updated) を返す。
+
+    Phase 1.5 で owner_by_id 追跡を追加: 既存 fish の owner_person_id が None → 設定値に
+    変わったタイミングで fish_owner_updated を発火。realtime_loop の _link_fish_to_person
+    が guest_fish.json を書き換えると watchdog で再評価されてここを通る。
+    """
     fishes = (gf or {}).get("fishes", []) or []
-    events = []
+    added = []
+    updated = []
     for f in fishes:
         fid = f.get("id")
-        if not fid or fid in guest_fish_tracker["known_ids"]:
+        if not fid:
             continue
-        guest_fish_tracker["known_ids"].add(fid)
-        events.append(_fish_to_payload(f))
-    return events
+        owner = f.get("owner_person_id")
+        if fid not in guest_fish_tracker["known_ids"]:
+            guest_fish_tracker["known_ids"].add(fid)
+            guest_fish_tracker["owner_by_id"][fid] = owner
+            added.append(_fish_to_payload(f))
+        else:
+            prev_owner = guest_fish_tracker["owner_by_id"].get(fid)
+            if prev_owner != owner:
+                guest_fish_tracker["owner_by_id"][fid] = owner
+                updated.append({"id": fid, "owner_person_id": owner})
+    return added, updated
+
+
+def compute_owner_present_event(zs, gf):
+    """recognized_person_id が変化したら fish_owner_present イベント payload を返す。
+
+    payload: {person_id, fish_ids}。person_id が None / "" になっても発火させる
+    (フロント側で前面化を解除するため)。変化なしなら None。
+    """
+    person_id = (zs or {}).get("recognized_person_id")
+    if person_id == owner_present_tracker["current_person_id"]:
+        return None
+    owner_present_tracker["current_person_id"] = person_id
+    fish_ids = []
+    if person_id:
+        for f in (gf or {}).get("fishes", []) or []:
+            if f.get("owner_person_id") == person_id and f.get("id"):
+                fish_ids.append(f["id"])
+    return {"person_id": person_id, "fish_ids": fish_ids}
 
 
 async def broadcast(event_type, payload):
@@ -224,9 +265,18 @@ async def evaluate_and_emit():
 
     if GUEST_FISH_FILE is not None:
         gf = _load_json(GUEST_FISH_FILE)
-        for payload in compute_new_guest_fish_events(gf):
-            log.info("guest fish -> %s", payload)
+        added, updated = compute_guest_fish_events(gf)
+        for payload in added:
+            log.info("guest fish added -> %s", payload)
             await broadcast("fish_added", payload)
+        for payload in updated:
+            log.info("guest fish owner updated -> %s", payload)
+            await broadcast("fish_owner_updated", payload)
+        # Phase 1.5: 顔認識 person_id 変化に追従して紐付き魚の前面化トリガー
+        owner_event = compute_owner_present_event(zs, gf)
+        if owner_event is not None:
+            log.info("fish_owner_present -> %s", owner_event)
+            await broadcast("fish_owner_present", owner_event)
 
 
 class FilesHandler(FileSystemEventHandler):
@@ -285,6 +335,20 @@ async def ws_handler(websocket):
                     continue
                 await websocket.send(
                     json.dumps({"type": "fish_added", "payload": _fish_to_payload(fish)})
+                )
+            # Phase 1.5: 現在認識されている owner がいれば前面化トリガーも送る
+            cur_pid = owner_present_tracker["current_person_id"]
+            if cur_pid:
+                fish_ids = [
+                    f["id"]
+                    for f in (gf or {}).get("fishes", []) or []
+                    if f.get("owner_person_id") == cur_pid and f.get("id")
+                ]
+                await websocket.send(
+                    json.dumps({
+                        "type": "fish_owner_present",
+                        "payload": {"person_id": cur_pid, "fish_ids": fish_ids},
+                    })
                 )
         async for _ in websocket:
             pass

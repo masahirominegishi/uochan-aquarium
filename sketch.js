@@ -246,8 +246,25 @@ window.aquarium = {
         break;
       case 'fish_added':
         // 接続時の初期同期 + 新規アップロード時に bridge から飛んでくる
-        this.addGuestFish(payload.image_url, { id: payload.id });
+        this.addGuestFish(payload.image_url, {
+          id: payload.id,
+          ownerPersonId: payload.owner_person_id,
+        });
         return;  // _apply() は不要 (うおちゃん本体の状態は変わらない)
+      case 'fish_owner_updated':
+        // Phase 1.5: 既存ゲスト魚の飼い主が確定/変更したとき
+        for (const g of guestFishes) {
+          if (g.id === payload.id) g.setOwnerPersonId(payload.owner_person_id);
+        }
+        return;
+      case 'fish_owner_present':
+        // Phase 1.5: 飼い主候補が水槽前に来た / いなくなった
+        // payload.fish_ids に入っているものだけ前面化、それ以外は解除
+        {
+          const ids = new Set(payload.fish_ids || []);
+          for (const g of guestFishes) g.setHighlighted(ids.has(g.id));
+        }
+        return;
       default:
         console.warn('[aquarium] unknown event type:', type);
         return;
@@ -267,6 +284,14 @@ window.aquarium = {
   // ゲスト魚を追加 (ws-client.js から呼ばれる)
   // imageUrl から非同期に画像を読み込み、GuestFish として guestFishes 配列に push
   addGuestFish(imageUrl, options = {}) {
+    // 同じ id が既に存在すれば追加せず ownerPersonId だけ更新する (welcome 多重防止)
+    if (options.id) {
+      const existing = guestFishes.find((g) => g.id === options.id);
+      if (existing) {
+        if (options.ownerPersonId !== undefined) existing.setOwnerPersonId(options.ownerPersonId);
+        return;
+      }
+    }
     loadImage(
       imageUrl,
       (img) => {

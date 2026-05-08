@@ -7,6 +7,8 @@
   "static_root": "..",
   "guest_fish_dir": "../guest_fish",
   "guest_fish_path": "../guest_fish.json",
+  "pending_owner_link_path": "/home/mine/Documents/fish_ai_realtime/pending_owner_link.json",
+  "_pending_owner_link_comment": "Phase 1.5 (飼い主登録) で realtime_loop が読むトリガーファイル。upload_server から書く。Phase 2/3 では廃止予定",
   "background_removal": {
     "value_threshold": 240,
     "saturation_threshold": 30,

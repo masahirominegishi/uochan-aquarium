@@ -73,6 +73,18 @@ GUEST_FISH_DIR = _resolve_path(
 GUEST_FISH_PATH = _resolve_path(
     _env_or("AQUARIUM_GUEST_FISH_PATH", _cfg.get("guest_fish_path", "../guest_fish.json"))
 )
+# Phase 1.5: realtime_loop に「飼い主登録しますか？」を聞かせるためのトリガーファイル。
+# upload_server がアップロード成功時に書き、realtime_loop が次の zone_and_greet_loop tick
+# で読み取って消費する。Phase 2/3 では廃止される (realtime_loop 内から直接呼ぶため)。
+PENDING_OWNER_LINK_PATH = _resolve_path(
+    _env_or(
+        "AQUARIUM_PENDING_OWNER_LINK_PATH",
+        _cfg.get(
+            "pending_owner_link_path",
+            "/home/mine/Documents/fish_ai_realtime/pending_owner_link.json",
+        ),
+    )
+)
 
 V_THRESH = int(_cfg.get("background_removal", {}).get("value_threshold", 240))
 S_THRESH = int(_cfg.get("background_removal", {}).get("saturation_threshold", 30))
@@ -247,6 +259,22 @@ async def api_upload_handler(request: web.Request) -> web.Response:
         )
         _save_metadata(data)
 
+    # Phase 1.5: realtime_loop に「飼い主登録しますか？」のトリガーを渡す。
+    # 失敗してもアップロード自体は成功扱いにする (realtime_loop が落ちていても水槽には魚が出る)。
+    try:
+        PENDING_OWNER_LINK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = PENDING_OWNER_LINK_PATH.with_suffix(PENDING_OWNER_LINK_PATH.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(
+                {"fish_id": fish_id, "uploaded_at": time.time()},
+                f,
+                ensure_ascii=False,
+            )
+        os.replace(tmp, PENDING_OWNER_LINK_PATH)
+        log.info("pending_owner_link written: %s", fish_id)
+    except Exception as e:
+        log.warning("pending_owner_link write failed: %s", e)
+
     log.info("guest fish uploaded: %s (%d bytes raw)", fish_id, len(raw))
     return web.json_response(
         {"ok": True, "id": fish_id, "image_url": f"/guest_fish/{out_name}"}
@@ -362,6 +390,7 @@ def main():
     log.info("STATIC_ROOT: %s", STATIC_ROOT)
     log.info("GUEST_FISH_DIR: %s", GUEST_FISH_DIR)
     log.info("GUEST_FISH_PATH: %s", GUEST_FISH_PATH)
+    log.info("PENDING_OWNER_LINK_PATH: %s", PENDING_OWNER_LINK_PATH)
     log.info("listening on http://%s:%d", HOST, PORT)
     web.run_app(make_app(), host=HOST, port=PORT, print=None)
 

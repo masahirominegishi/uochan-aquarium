@@ -268,6 +268,24 @@ class GuestFish {
     this.waveAmpHead = options.waveAmpHead || 1;
     this.waveAmpTail = options.waveAmpTail || 14;
     this.waveSpeed = options.waveSpeed || 0.16;
+
+    // Phase 1.5 飼い主登録
+    this.ownerPersonId = options.ownerPersonId !== undefined ? options.ownerPersonId : null;
+    this.isHighlighted = false;     // 飼い主が水槽前にいるとき true
+    this.highlightStartedAt = 0;
+  }
+
+  // -----------------------------------------------------------
+  // Phase 1.5: 飼い主登録 / 再来訪演出
+  // -----------------------------------------------------------
+  setOwnerPersonId(pid) {
+    this.ownerPersonId = pid || null;
+  }
+
+  setHighlighted(on) {
+    if (on === this.isHighlighted) return;
+    this.isHighlighted = !!on;
+    if (this.isHighlighted) this.highlightStartedAt = millis();
   }
 
   update() {
@@ -284,13 +302,26 @@ class GuestFish {
   }
 
   draw() {
+    // Phase 1.5: 前面化中はうっすら光るハロー (背景に淡い円) を出す
+    if (this.isHighlighted) {
+      const elapsed = (millis() - this.highlightStartedAt) / 1000;
+      const longest = Math.max(this.image.width, this.image.height) * this.scale;
+      const pulse = sin(elapsed * 2.0) * 6 + 14;
+      const haloR = longest * 0.7 + pulse;
+      noStroke();
+      fill(255, 240, 180, 70);
+      ellipse(this.x, this.y, haloR * 2);
+    }
+
     push();
     translate(this.x, this.y);
 
     // 進行方向に合わせて水平反転 (画像はどちら向きでも、進行方向に頭が向くようにする)
     // ここでは「画像は左向き」と仮定。vx > 0 のときは反転して右向きにする。
     const flip = this.vx > 0 ? -1 : 1;
-    scale(flip * this.scale, this.scale);
+    // 飼い主が前に来たら少し大きく (前面化感)
+    const sizeMul = this.isHighlighted ? 1.2 : 1.0;
+    scale(flip * this.scale * sizeMul, this.scale * sizeMul);
 
     // 画像中心を fish の位置に揃える
     translate(-this.image.width / 2, -this.image.height / 2);
