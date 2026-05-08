@@ -86,8 +86,9 @@ PENDING_OWNER_LINK_PATH = _resolve_path(
     )
 )
 
-V_THRESH = int(_cfg.get("background_removal", {}).get("value_threshold", 240))
-S_THRESH = int(_cfg.get("background_removal", {}).get("saturation_threshold", 30))
+V_THRESH = int(_cfg.get("background_removal", {}).get("value_threshold", 220))
+S_THRESH = int(_cfg.get("background_removal", {}).get("saturation_threshold", 60))
+PAPER_FLOOD_THRESH = int(_cfg.get("background_removal", {}).get("paper_flood_thresh", 60))
 LONG_EDGE = int(_cfg.get("output", {}).get("long_edge", 600))
 MAX_BYTES = int(_cfg.get("upload", {}).get("max_bytes", 25 * 1024 * 1024))
 
@@ -155,6 +156,7 @@ async def api_upload_handler(request: web.Request) -> web.Response:
                 img,
                 v_thresh=V_THRESH,
                 s_thresh=S_THRESH,
+                paper_flood_thresh=PAPER_FLOOD_THRESH,
                 long_edge=LONG_EDGE,
             ),
         )

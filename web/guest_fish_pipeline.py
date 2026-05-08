@@ -34,14 +34,42 @@ def _edge_connected_bg_mask(bg_candidate: np.ndarray) -> np.ndarray:
     return arr == 128
 
 
+def _edge_connected_gray_mask(gray: np.ndarray, thresh: int) -> np.ndarray:
+    """グレースケール画像の縁から色差 thresh 以内で連結する領域を返す。
+
+    画像の縁ピクセルの代表色 (中央値) を bordered の 1px 縁に塗り、そこから
+    flood fill して thresh 以内の連結を背景マークする。テーブル等の色付き
+    領域 (画像縁周辺) を捕捉するための処理。紙の白は中央値 (テーブル色) と
+    色差が大きいので捕捉されず、HSV 閾値側で別途処理される。
+    """
+    h, w = gray.shape
+    edge_pixels = np.concatenate([gray[0, :], gray[-1, :], gray[:, 0], gray[:, -1]])
+    edge_repr = int(np.median(edge_pixels))
+    bordered = Image.new("L", (w + 2, h + 2), edge_repr)
+    bordered.paste(Image.fromarray(gray, "L"), (1, 1))
+    ImageDraw.floodfill(bordered, (0, 0), 200, thresh=thresh)
+    arr = np.asarray(bordered)[1:-1, 1:-1]
+    return arr == 200
+
+
 def remove_white_background(
     img: Image.Image,
     *,
-    v_thresh: int = 240,
-    s_thresh: int = 30,
+    v_thresh: int = 220,
+    s_thresh: int = 60,
+    paper_flood_thresh: int = 60,
     long_edge: int = 600,
 ) -> Image.Image:
-    """HSV で白っぽいピクセルを抽出 → 縁から繋がっている部分だけを透明化 → トリミング & 長辺リサイズ。"""
+    """白っぽい紙 + 紙の外側の背景を透明化 → トリミング & 長辺リサイズ。
+
+    2 段階で背景を捕捉:
+      1) HSV 閾値で白っぽいピクセルを抽出し、縁から flood fill で繋がる白を透明化
+         (紙の中の白を残しつつ、紙の縁周辺の白を消す)
+      2) グレースケールで縁から色差 paper_flood_thresh 以内で flood fill
+         (紙の外側のテーブル等の色付き領域も透明化)
+
+      paper_flood_thresh=0 で 2) を無効化できる。
+    """
     img = ImageOps.exif_transpose(img).convert("RGB")
     arr = np.array(img).astype(np.float32)
     r = arr[..., 0]
@@ -54,6 +82,10 @@ def remove_white_background(
     bg_candidate = (v >= v_thresh) & (s <= s_thresh)
 
     bg_mask = _edge_connected_bg_mask(bg_candidate)
+
+    if paper_flood_thresh > 0:
+        gray = (0.299 * r + 0.587 * g + 0.114 * b).astype(np.uint8)
+        bg_mask = bg_mask | _edge_connected_gray_mask(gray, paper_flood_thresh)
 
     rgba = np.dstack([arr.astype(np.uint8), np.full(arr.shape[:2], 255, dtype=np.uint8)])
     rgba[bg_mask] = [0, 0, 0, 0]
