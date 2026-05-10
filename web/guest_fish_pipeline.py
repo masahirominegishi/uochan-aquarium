@@ -484,10 +484,11 @@ def fish_mask(rgb: np.ndarray, *, ink_thresh: int, bg_blur: int = 0, close_px: i
     k = max(0, int(close_px))
     if k > 0:
         bridged = _bridge_endpoint_gaps(ink, max_gap=2 * k)            # 隙間を直線で閉じる (太らせない)
-        sealed = ndimage.binary_closing(bridged, structure=np.ones((3, 3)), iterations=2)  # 残った ~2px の隙間だけ
+        cseal = max(2, min(int(k) // 3, 14))                           # 直線で繋ぎ切れなかった小さな隙間 (ヒレ等) を埋める用の close
+        sealed = ndimage.binary_closing(bridged, structure=np.ones((3, 3)), iterations=cseal)
         lc = _largest_component(sealed)
         if ndimage.binary_fill_holes(lc).sum() >= 2.2 * int(lc.sum()):
-            body = ndimage.binary_fill_holes(sealed)                   # 閉じた輪郭の中をすべて満たす (体 + 閉じた腹びれ等も)
+            body = ndimage.binary_fill_holes(sealed)                   # 閉じた輪郭の中をすべて満たす (体 + 閉じた/小隙間のヒレ等も)
         else:
             # 直線つなぎで体が閉じ切らず中空 → モルフォロジー (太い円弧) でフォールバック
             grown = _largest_component(ndimage.binary_dilation(bridged, iterations=k))
