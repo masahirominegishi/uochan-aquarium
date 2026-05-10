@@ -32,10 +32,10 @@
   "bg_method": "shape",
   "_bg_method_comment": "ゲスト魚の切り抜き方式。'shape' = 形ベース (背景差分でインク検出→輪郭の隙間を膨張で橋渡し→中を満たす→輪郭を整える。輪郭の内側は写真のまま、外だけ透明。露出/色かぶりに強い)。'hsv' = 旧 (HSV しきい値で縁から繋がる白を透明化)。",
   "shape_detect": {
-    "autocontrast": true,
+    "autocontrast": false,
     "autocontrast_cutoff": 1,
-    "white_balance": false,
-    "wb_target": 245,
+    "white_balance": true,
+    "wb_target": 241,
     "levels_black": 0,
     "levels_white": 255,
     "levels_gamma": 1.0,
