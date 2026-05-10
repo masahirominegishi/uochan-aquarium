@@ -294,21 +294,28 @@ def compute_silhouette(rgb: np.ndarray, *, v_thresh: int, s_thresh: int, close_p
 # 捉えて切り抜く。1) 背景差分でインクを拾う → 2) 隙間を膨張で橋渡しして輪郭を閉じる
 # → 3) 中を alpha で満たす (色は元のまま) → 4) 輪郭をなめらかに整える。
 def _paper_background(rgb: np.ndarray, blur: int) -> np.ndarray:
-    """紙の面 (ビネット・色かぶり込みの、なだらかに変化する成分) をメディアンぼかしで推定。
+    """紙の面 (ビネット・色かぶり込みの、なだらかに変化する成分) を推定して返す。
 
-    blur=0 で自動。窓は大きめにする (= 線画が集まった所 (目の輪郭等) で推定が暗側に
-    引っ張られて、その内側の白だけ過剰に明るくなる artifact を避ける)。
+    インクや塗りつぶしで推定が汚染されないよう、まず「明るく彩度の低い = 紙」のピクセル
+    だけ残して、それ以外 (線画・色塗り) は周囲の紙から inpaint で埋める → その後メディアン
+    ぼかしで滑らかに。これで塗りつぶした絵でも「その下にあるはずの白い紙」を推定できる。
+    blur=0 で自動 (窓は大きめ ~画像長辺の 7%、最小 31・最大 151)。
     """
     import cv2
     h, w = rgb.shape[:2]
+    src = np.ascontiguousarray(rgb)
+    v, s = _value_saturation(rgb)
+    paper_mask = (v >= 195) & (s <= 35)               # 紙っぽいピクセル
+    if 0.02 <= float(paper_mask.mean()) < 0.999:      # 紙が一定以上あり、かつ全部が紙ではない
+        nonpaper = np.ascontiguousarray((~paper_mask).astype(np.uint8))
+        src = cv2.inpaint(src, nonpaper, 5, cv2.INPAINT_TELEA)   # 線画・色塗りの所を周囲の紙で埋める
     if blur and blur > 0:
         k = int(blur)
     else:
-        k = max(31, int(round(max(h, w) * 0.07)))   # ~画像長辺の 7%
-        k = min(k, 151)
+        k = min(151, max(31, int(round(max(h, w) * 0.07))))
     if k % 2 == 0:
         k += 1
-    return cv2.medianBlur(np.ascontiguousarray(rgb), k)
+    return cv2.medianBlur(src, k)
 
 
 def flat_field(rgb: np.ndarray, *, blur: int = 0, target: int = 245) -> np.ndarray:
