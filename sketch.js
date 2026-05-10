@@ -22,6 +22,14 @@ let plants  = [];    // 水草の位置情報
 let partsConfig;     // assets/uochan/parts.json
 let parts = {};      // { imageName: p5.Image } : 12 パーツの透過 PNG
 
+// ゲスト魚が水槽に入るときの効果音 (drop → into を続けて鳴らす)。
+// p5.sound は使わず素の HTMLAudioElement で再生する (preload をブロックしない / ライブラリ不要)。
+let sndDrop = null;  // sound/drop.mp3
+let sndInto = null;  // sound/into.mp3
+// 起動直後の初期同期 (bridge が既存の魚を全部 fish_added で送ってくる) では鳴らさないためのフラグ。
+// ページ表示から数秒経つまで false にしておく。
+let _soundReady = false;
+
 // うおちゃんの 12 パーツ。preload で全部読み込む。
 const UOCHAN_IMAGES = [
   'body', 'head',
@@ -74,6 +82,39 @@ function setup() {
       sway: random(TWO_PI),
       back: false,              // 手前側（魚より前に描く）
     });
+  }
+
+  // 効果音を読み込む (素の Audio。失敗しても水槽描画には影響しない)
+  try {
+    sndDrop = new Audio('sound/drop.mp3');
+    sndInto = new Audio('sound/into.mp3');
+    sndDrop.preload = 'auto';
+    sndInto.preload = 'auto';
+    // drop の再生が終わったら続けて into を鳴らす
+    sndDrop.addEventListener('ended', () => {
+      sndInto.currentTime = 0;
+      sndInto.play().catch(() => {});
+    });
+  } catch (e) {
+    console.warn('[aquarium] 効果音の初期化に失敗', e);
+    sndDrop = sndInto = null;
+  }
+
+  // 起動直後の初期同期 (接続時に既存の魚が一気に fish_added で飛んでくる) で効果音が
+  // 鳴らないように、表示から少し経ってから効果音を解禁する。
+  setTimeout(() => { _soundReady = true; }, 4000);
+}
+
+// ゲスト魚が水槽に入る瞬間の効果音: drop → (ended で) into。
+// ブラウザの autoplay 制限により、ページに一度もユーザー操作がない状態だと play() は
+// 拒否される。フルスクリーンボタンを一度押せば以降は鳴る。拒否時は静かに無視する。
+function _playGuestFishEnterSound() {
+  if (!_soundReady || !sndDrop) return;
+  try {
+    sndDrop.currentTime = 0;
+    sndDrop.play().catch(() => {});
+  } catch (e) {
+    /* ignore */
   }
 }
 
@@ -303,6 +344,7 @@ window.aquarium = {
         const fish = new GuestFish(img, options);
         guestFishes.push(fish);
         console.log(`[aquarium] guest fish added: ${fish.id} (total ${guestFishes.length})`);
+        _playGuestFishEnterSound();
       },
       (err) => {
         console.warn(`[aquarium] failed to load guest fish image: ${imageUrl}`, err);
