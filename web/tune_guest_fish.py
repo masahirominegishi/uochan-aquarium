@@ -373,7 +373,7 @@ def sweep_levels_white(src: Image.Image, out_dir: Path, white_list: list[int], *
                                       smooth=p["smooth"], long_edge=p["long_edge"])
         cells.append((f"levels_white={wt}  {res.size[0]}x{res.size[1]}", res))
         print(f"  levels_white={wt:>3} -> {res.size[0]}x{res.size[1]}")
-    _montage(cells, out_dir, cols=min(len(white_list), 4))
+    _montage(cells, out_dir, cols=min(len(white_list), 5))
 
 
 def _paper_detect_visual(src: Image.Image, bbox, *, fit_to=(1900, 1060)) -> Image.Image:
