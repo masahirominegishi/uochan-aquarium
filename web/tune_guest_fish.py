@@ -360,6 +360,22 @@ def sweep_wb(src: Image.Image, out_dir: Path, wb_list: list[int], **kw) -> None:
     _montage(cells, out_dir, cols=5)
 
 
+def sweep_levels_white(src: Image.Image, out_dir: Path, white_list: list[int], **kw) -> None:
+    """shape 固定で levels_white (白点) を振ったモンタージュ (= 「グレーの部分をどこまで白に引き上げるか」を比較)。
+    levels_black は 0 固定 (暗部/色には触らない)。先に flat-field 正規化が効いている前提。"""
+    p = resolve_params(**kw)
+    cells = []
+    print(f"==> levels_white スイープ (shape, white_balance={p['white_balance']} wb_target={p['wb_target']}, levels_black=0)")
+    for wt in white_list:
+        res = remove_white_background(src, bg_method="shape", white_balance=p["white_balance"], wb_target=p["wb_target"],
+                                      levels_black=0, levels_white=wt, levels_gamma=1.0,
+                                      ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"], close_px=p["close_px"],
+                                      smooth=p["smooth"], long_edge=p["long_edge"])
+        cells.append((f"levels_white={wt}  {res.size[0]}x{res.size[1]}", res))
+        print(f"  levels_white={wt:>3} -> {res.size[0]}x{res.size[1]}")
+    _montage(cells, out_dir, cols=min(len(white_list), 4))
+
+
 def _paper_detect_visual(src: Image.Image, bbox, *, fit_to=(1900, 1060)) -> Image.Image:
     """元画像を画面サイズに収めて、検出した紙面 bbox を緑枠で、外側を暗く塗った確認用画像。"""
     base = src.convert("RGB").copy()
@@ -410,7 +426,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="ゲスト魚トリミングのチューニング CLI", formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     ap.add_argument("--capture", action="store_true", help="rpicam-still で 1 枚撮って tune_out/latest.jpg に保存してから処理する")
     ap.add_argument("--camera", type=int, default=0, help="撮影に使うカメラ index (既定 0 = IMX219)")
-    ap.add_argument("--ev", type=float, default=-0.7, help="撮影時の露出補正 EV (既定 -0.7 = やや暗め。白飛び/色飛びを避ける)")
+    ap.add_argument("--ev", type=float, default=-0.8, help="撮影時の露出補正 EV (既定 -0.8 = やや暗め。白飛び/色飛びを避ける)")
     ap.add_argument("--rotation", type=int, default=180, help="撮影時の回転角 (既定 180、本番と同値)")
     ap.add_argument("--rpicam-extra", default="", help="rpicam-still に渡す追加引数 (例: '--awb tungsten --shutter 8000')")
     ap.add_argument("--no-led", action="store_true", help="撮影時にブース LED を点灯しない (既定は点灯する)")
@@ -459,6 +475,8 @@ def main() -> int:
     ap.add_argument("--wb-list", type=_parse_int_list, default=_parse_int_list("90,110,130,150,170,190,210,230,245,255"), help="--sweep-wb の wb_target リスト")
     ap.add_argument("--sweep-ev", action="store_true", help="撮影 EV を --ev-list で振って連続撮影し、加工なしの生キャプチャをモンタージュにする (基本の露出を決める用)")
     ap.add_argument("--ev-list", type=_parse_float_list, default=_parse_float_list("-2.4,-2.0,-1.6,-1.2,-0.8,-0.4,0.0,0.4,0.8,1.2"), help="--sweep-ev の EV リスト")
+    ap.add_argument("--sweep-levels-white", action="store_true", help="[shape] --levels-white-list を振ったモンタージュ (グレーをどこまで白に引き上げるか比較。levels_black=0 固定)")
+    ap.add_argument("--levels-white-list", type=_parse_int_list, default=_parse_int_list("255,235,220,208"), help="--sweep-levels-white の levels_white リスト")
     # HDMI 表示
     ap.add_argument("--show", action="store_true", help="処理後に結果を pi-main の HDMI 画面にフルスクリーン表示する")
     ap.add_argument("--show-target", choices=["detect", "crop", "result", "sweep", "mask", "wb"], default="result",
@@ -516,6 +534,8 @@ def main() -> int:
                    long_edge=args.long_edge)
     if args.sweep_wb:
         sweep_wb(work, out_dir, args.wb_list, **proc_kw)
+    elif args.sweep_levels_white:
+        sweep_levels_white(work, out_dir, args.levels_white_list, **proc_kw)
     elif args.sweep_levels:
         sweep_levels(work, out_dir, args.levels_black_list, **proc_kw)
     elif args.sweep_close:
