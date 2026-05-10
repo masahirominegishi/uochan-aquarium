@@ -9,6 +9,15 @@
   "guest_fish_path": "../guest_fish.json",
   "pending_owner_link_path": "/home/mine/Documents/fish_ai_realtime/pending_owner_link.json",
   "_pending_owner_link_comment": "Phase 1.5 (飼い主登録) で realtime_loop が読むトリガーファイル。upload_server から書く。Phase 2/3 では廃止予定",
+  "capture": {
+    "ev": -0.8,
+    "awb": "custom",
+    "awbgains": [
+      1.65,
+      1.2
+    ],
+    "_comment": "rpicam-still の撮影パラメータ。awb=custom + awbgains=[red,blue] で色かぶりを中和 (自動 AWB だと紙が青紫寄りになる)。2026-05-10 にこのブース/LED で ev=-0.8 / awbgains=1.65,1.20 に確定。tune_guest_fish.py の --capture はこれを使う。realtime_loop の _capture_and_register_guest_fish の rpicam-still にも同じ --awb custom --awbgains 1.65,1.20 --ev -0.8 を入れる予定 (step C)。"
+  },
   "paper_detect": {
     "value_threshold": 150,
     "saturation_threshold": 80,

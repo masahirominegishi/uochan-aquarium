@@ -97,10 +97,20 @@ def _realtime_loop_running() -> bool:
         return False
 
 
-def _rpicam_shot(dst: Path, *, camera: int, ev: float, rotation: int, extra: str) -> None:
+# 色かぶり中和済みの固定ホワイトバランス (2026-05-10、このブース/LED で確定)。
+# 自動 AWB は紙が青紫寄り (B が ~16% 過多) になるので custom で固定。realtime_loop の撮影も将来これに合わせる。
+AWB_DEFAULT = "custom"
+AWBGAINS_DEFAULT = "1.65,1.20"   # red gain, blue gain
+
+
+def _rpicam_shot(dst: Path, *, camera: int, ev: float, rotation: int, extra: str,
+                 awb: str = AWB_DEFAULT, awbgains: str = AWBGAINS_DEFAULT) -> None:
     cmd = ["rpicam-still", "--camera", str(camera), "--rotation", str(rotation), "-t", "200",
            "--width", str(CAPTURE_WIDTH), "--height", str(CAPTURE_HEIGHT), "--ev", str(ev),
-           "-o", str(dst), "--immediate", "-n"]
+           "--awb", str(awb)]
+    if str(awb) == "custom" and awbgains:
+        cmd += ["--awbgains", str(awbgains)]
+    cmd += ["-o", str(dst), "--immediate", "-n"]
     if extra:
         cmd += shlex.split(extra)
     print("==> " + " ".join(shlex.quote(c) for c in cmd))
@@ -120,14 +130,14 @@ def _led_on(use_led: bool, warmup: float) -> bool:
 
 
 def capture(out_dir: Path, *, camera: int, ev: float, rotation: int, extra: str,
-            use_led: bool, warmup: float) -> Path:
+            use_led: bool, warmup: float, awb: str = AWB_DEFAULT, awbgains: str = AWBGAINS_DEFAULT) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y%m%d_%H%M%S")
     dst = out_dir / f"capture_{ts}.jpg"
     led_on = False
     try:
         led_on = _led_on(use_led, warmup)
-        _rpicam_shot(dst, camera=camera, ev=ev, rotation=rotation, extra=extra)
+        _rpicam_shot(dst, camera=camera, ev=ev, rotation=rotation, extra=extra, awb=awb, awbgains=awbgains)
     finally:
         if led_on:
             _set_led(False)
@@ -139,7 +149,7 @@ def capture(out_dir: Path, *, camera: int, ev: float, rotation: int, extra: str,
 
 
 def capture_ev_sweep(out_dir: Path, ev_list: list[float], *, camera: int, rotation: int, extra: str,
-                     use_led: bool, warmup: float) -> Path | None:
+                     use_led: bool, warmup: float, awb: str = AWB_DEFAULT, awbgains: str = AWBGAINS_DEFAULT) -> Path | None:
     """EV を ev_list で振って連続撮影 (LED は最初に点けっぱなし)、加工なしの生キャプチャをモンタージュにする。"""
     out_dir.mkdir(parents=True, exist_ok=True)
     led_on = False
@@ -148,7 +158,7 @@ def capture_ev_sweep(out_dir: Path, ev_list: list[float], *, camera: int, rotati
         led_on = _led_on(use_led, warmup)
         for ev in ev_list:
             dst = out_dir / f"ev_{ev:+.1f}.jpg"
-            _rpicam_shot(dst, camera=camera, ev=ev, rotation=rotation, extra=extra)
+            _rpicam_shot(dst, camera=camera, ev=ev, rotation=rotation, extra=extra, awb=awb, awbgains=awbgains)
             shots.append((ev, dst))
             print(f"==> saved {dst}")
     finally:
@@ -443,6 +453,8 @@ def main() -> int:
     ap.add_argument("--capture", action="store_true", help="rpicam-still で 1 枚撮って tune_out/latest.jpg に保存してから処理する")
     ap.add_argument("--camera", type=int, default=0, help="撮影に使うカメラ index (既定 0 = IMX219)")
     ap.add_argument("--ev", type=float, default=-0.8, help="撮影時の露出補正 EV (既定 -0.8 = やや暗め。白飛び/色飛びを避ける)")
+    ap.add_argument("--awb", default=AWB_DEFAULT, help=f"撮影時のホワイトバランスモード (既定 {AWB_DEFAULT})。auto/incandescent/tungsten/fluorescent/indoor/daylight/cloudy/custom")
+    ap.add_argument("--awbgains", default=AWBGAINS_DEFAULT, help=f"--awb custom のときの red,blue ゲイン (既定 {AWBGAINS_DEFAULT} = 色かぶり中和済み)")
     ap.add_argument("--rotation", type=int, default=180, help="撮影時の回転角 (既定 180、本番と同値)")
     ap.add_argument("--rpicam-extra", default="", help="rpicam-still に渡す追加引数 (例: '--awb tungsten --shutter 8000')")
     ap.add_argument("--no-led", action="store_true", help="撮影時にブース LED を点灯しない (既定は点灯する)")
@@ -510,7 +522,8 @@ def main() -> int:
 
     if args.sweep_ev:
         capture_ev_sweep(out_dir, args.ev_list, camera=args.camera, rotation=args.rotation,
-                         extra=args.rpicam_extra, use_led=not args.no_led, warmup=args.led_warmup)
+                         extra=args.rpicam_extra, use_led=not args.no_led, warmup=args.led_warmup,
+                         awb=args.awb, awbgains=args.awbgains)
         if args.show:
             sp = out_dir / "sweep.png"
             if sp.exists():
@@ -519,7 +532,8 @@ def main() -> int:
 
     if args.capture:
         src_path = capture(out_dir, camera=args.camera, ev=args.ev, rotation=args.rotation,
-                           extra=args.rpicam_extra, use_led=not args.no_led, warmup=args.led_warmup)
+                           extra=args.rpicam_extra, use_led=not args.no_led, warmup=args.led_warmup,
+                           awb=args.awb, awbgains=args.awbgains)
     else:
         src_path = args.input or (out_dir / "latest.jpg")
         if not src_path.exists():
