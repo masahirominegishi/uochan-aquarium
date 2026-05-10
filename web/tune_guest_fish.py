@@ -10,7 +10,8 @@ python で起動する:
   ~/Documents/fish_ai_realtime/.venv/bin/python ~/Documents/aquarium/web/tune_guest_fish.py --help
 
 典型ワークフロー:
-  1. ブースに代表的な絵を置いて撮る (本番と同じ rpicam-still 引数 + --rotation 180):
+  1. ブースに代表的な絵を置いて撮る (本番と同じ rpicam-still 引数 + --rotation 180、
+     撮影時はブース LED を自動点灯 → ウォームアップ → 撮影 → 消灯。--no-led で抑止):
        ... tune_guest_fish.py --capture
      → tune_out/capture_<ts>.jpg と tune_out/latest.jpg に保存
   2. しきい値スイープ → モンタージュ画像で見比べる:
@@ -28,6 +29,7 @@ python で起動する:
 """
 
 import argparse
+import os
 import shlex
 import subprocess
 import sys
@@ -48,12 +50,41 @@ DEFAULT_OUT_DIR = REPO_ROOT / "tune_out"
 CAPTURE_WIDTH = 1640
 CAPTURE_HEIGHT = 1232
 
+# 撮影ブースの LED リレー (realtime_loop.py の Phase 3 設定と同じ env を尊重)
+RELAY_GPIO = int(os.environ.get("PHASE3_RELAY_GPIO", "18"))            # BCM
+RELAY_ACTIVE_LOW = os.environ.get("PHASE3_RELAY_ACTIVE_LOW", "false").lower() == "true"
+LED_WARMUP_DEFAULT = float(os.environ.get("PHASE3_LIGHT_WARMUP_DELAY", "1.5"))  # 秒
+
 
 def _parse_int_list(s: str) -> list[int]:
     return [int(x) for x in s.replace(" ", "").split(",") if x != ""]
 
 
-def capture(out_dir: Path, *, camera: int, ev: float, rotation: int, extra: str) -> Path:
+def _set_led(on: bool) -> bool:
+    """ブース LED を pinctrl で ON/OFF する。成功したら True。
+
+    realtime_loop.py が走行中だと gpiod 経由でリレーを保持しているので衝突
+    する。チューニング時 (realtime_loop は停止しているはず) 専用。
+    """
+    drive = "dh" if (on != RELAY_ACTIVE_LOW) else "dl"
+    try:
+        subprocess.run(["pinctrl", "set", str(RELAY_GPIO), "op", drive], check=True, timeout=5)
+        return True
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        print(f"[LED] pinctrl 失敗 (LED 制御をスキップ): {e}", file=sys.stderr)
+        return False
+
+
+def _realtime_loop_running() -> bool:
+    try:
+        out = subprocess.run(["pgrep", "-f", "realtime_loop.py"], capture_output=True, text=True, timeout=5)
+        return out.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def capture(out_dir: Path, *, camera: int, ev: float, rotation: int, extra: str,
+            use_led: bool, warmup: float) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y%m%d_%H%M%S")
     dst = out_dir / f"capture_{ts}.jpg"
@@ -71,8 +102,23 @@ def capture(out_dir: Path, *, camera: int, ev: float, rotation: int, extra: str)
     ]
     if extra:
         cmd += shlex.split(extra)
-    print("==> " + " ".join(shlex.quote(c) for c in cmd))
-    subprocess.run(cmd, check=True, timeout=20)
+
+    led_on = False
+    try:
+        if use_led:
+            if _realtime_loop_running():
+                print("[LED] 警告: realtime_loop.py が走行中です。リレーが衝突する可能性があります。", file=sys.stderr)
+            led_on = _set_led(True)
+            if led_on:
+                print(f"[LED] ON (BCM{RELAY_GPIO})、ウォームアップ {warmup}s")
+                time.sleep(warmup)
+        print("==> " + " ".join(shlex.quote(c) for c in cmd))
+        subprocess.run(cmd, check=True, timeout=20)
+    finally:
+        if led_on:
+            _set_led(False)
+            print(f"[LED] OFF (BCM{RELAY_GPIO})")
+
     latest = out_dir / "latest.jpg"
     latest.write_bytes(dst.read_bytes())
     print(f"==> saved {dst}  (も {latest})")
@@ -185,6 +231,8 @@ def main() -> int:
     ap.add_argument("--ev", type=float, default=0.5, help="撮影時の露出補正 EV (既定 0.5、本番と同値)")
     ap.add_argument("--rotation", type=int, default=180, help="撮影時の回転角 (既定 180、本番と同値)")
     ap.add_argument("--rpicam-extra", default="", help="rpicam-still に渡す追加引数 (例: '--awb tungsten --shutter 8000')")
+    ap.add_argument("--no-led", action="store_true", help="撮影時にブース LED を点灯しない (既定は点灯する)")
+    ap.add_argument("--led-warmup", type=float, default=LED_WARMUP_DEFAULT, help=f"LED 点灯から撮影までの待ち秒数 (既定 {LED_WARMUP_DEFAULT})")
     ap.add_argument("--input", type=Path, help="処理する画像 (既定: tune_out/latest.jpg)")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help=f"出力先 (既定 {DEFAULT_OUT_DIR})")
     ap.add_argument("--v-thresh", type=int, help="単発実行時の value 閾値 (省略時は env/config/既定値)")
@@ -199,7 +247,8 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if args.capture:
-        src_path = capture(out_dir, camera=args.camera, ev=args.ev, rotation=args.rotation, extra=args.rpicam_extra)
+        src_path = capture(out_dir, camera=args.camera, ev=args.ev, rotation=args.rotation,
+                           extra=args.rpicam_extra, use_led=not args.no_led, warmup=args.led_warmup)
     else:
         src_path = args.input or (out_dir / "latest.jpg")
         if not src_path.exists():
