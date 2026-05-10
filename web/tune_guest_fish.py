@@ -51,6 +51,7 @@ from PIL import Image, ImageDraw, ImageFont
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from guest_fish_pipeline import (  # noqa: E402
     compute_bg_mask,
+    compute_silhouette,
     crop_to_paper,
     remove_white_background,
     resolve_paper_params,
@@ -179,35 +180,49 @@ def _fit(im: Image.Image, box: tuple[int, int]) -> Image.Image:
     return im
 
 
-def single(src: Image.Image, out_dir: Path, v_thresh, s_thresh, long_edge) -> None:
-    params = resolve_params(v_thresh, s_thresh, long_edge)
+def _mask_overlay(src_rgb: np.ndarray, removed: np.ndarray) -> Image.Image:
+    """除去されるピクセル (removed=True) を赤、残る範囲の bbox を緑枠で重ねた可視化。"""
+    overlay = src_rgb.copy()
+    red = np.array([255, 40, 40], dtype=np.float32)
+    overlay[removed] = (overlay[removed].astype(np.float32) * 0.35 + red * 0.65).astype(np.uint8)
+    ov = Image.fromarray(overlay, "RGB")
+    keep = ~removed
+    if keep.any():
+        ys, xs = np.where(keep)
+        ImageDraw.Draw(ov).rectangle([int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())],
+                                     outline=(0, 230, 0), width=4)
+    return ov
+
+
+def single(src: Image.Image, out_dir: Path, v_thresh, s_thresh, long_edge, fill_body, fill_close) -> None:
+    params = resolve_params(v_thresh, s_thresh, long_edge, fill_body, fill_close)
     print(f"==> 使用パラメータ: {params}")
     src_rgb = np.array(src.convert("RGB"))
 
-    result = remove_white_background(src, v_thresh=params["v_thresh"], s_thresh=params["s_thresh"], long_edge=params["long_edge"])
+    result = remove_white_background(src, v_thresh=params["v_thresh"], s_thresh=params["s_thresh"],
+                                     long_edge=params["long_edge"], fill_body=params["fill_body"],
+                                     fill_close=params["fill_close"])
     res_path = out_dir / "result.png"
     result.save(res_path)
     _on_checker(result).convert("RGB").save(out_dir / "result_on_checker.png")
     print(f"==> 結果 {result.size[0]}x{result.size[1]} -> {res_path} (+ result_on_checker.png)")
 
-    # マスク可視化: 除去されるピクセルを赤、トリミング bbox を緑枠で重ねる
-    mask = compute_bg_mask(src_rgb, v_thresh=params["v_thresh"], s_thresh=params["s_thresh"])
-    overlay = src_rgb.copy()
-    red = np.array([255, 40, 40], dtype=np.float32)
-    overlay[mask] = (overlay[mask].astype(np.float32) * 0.35 + red * 0.65).astype(np.uint8)
-    ov = Image.fromarray(overlay, "RGB")
-    keep = ~mask
-    if keep.any():
-        ys, xs = np.where(keep)
-        d = ImageDraw.Draw(ov)
-        d.rectangle([int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())], outline=(0, 230, 0), width=4)
+    if params["fill_body"]:
+        sil = compute_silhouette(src_rgb, v_thresh=params["v_thresh"], s_thresh=params["s_thresh"], close_px=params["fill_close"])
+        removed = ~sil
+        note = f"赤=透明化される範囲 / 緑枠=crop 範囲 (fill_body, close={params['fill_close']})"
+    else:
+        removed = compute_bg_mask(src_rgb, v_thresh=params["v_thresh"], s_thresh=params["s_thresh"])
+        note = "赤=除去 / 緑枠=crop 範囲"
     ov_path = out_dir / "mask_overlay.png"
-    ov.save(ov_path)
-    print(f"==> マスク可視化 (赤=除去 / 緑枠=crop 範囲) -> {ov_path}")
+    _mask_overlay(src_rgb, removed).save(ov_path)
+    print(f"==> マスク可視化 ({note}) -> {ov_path}")
 
 
-def sweep(src: Image.Image, out_dir: Path, v_list: list[int], s_list: list[int], long_edge) -> None:
-    le = resolve_params(None, None, long_edge)["long_edge"]
+def sweep(src: Image.Image, out_dir: Path, v_list: list[int], s_list: list[int], long_edge,
+          fill_body, fill_close) -> None:
+    p0 = resolve_params(None, None, long_edge, fill_body, fill_close)
+    le, fb, fc = p0["long_edge"], p0["fill_body"], p0["fill_close"]
     tile = 300
     label_h = 22
     pad = 8
@@ -217,10 +232,10 @@ def sweep(src: Image.Image, out_dir: Path, v_list: list[int], s_list: list[int],
     sheet = Image.new("RGB", (cols * cell_w + pad, rows * cell_h + pad), (255, 255, 255))
     d = ImageDraw.Draw(sheet)
     font = _font(13)
-
+    print(f"==> v×s スイープ (fill_body={fb}{f', close={fc}' if fb else ''})")
     for ri, s in enumerate(s_list):
         for ci, v in enumerate(v_list):
-            res = remove_white_background(src, v_thresh=v, s_thresh=s, long_edge=le)
+            res = remove_white_background(src, v_thresh=v, s_thresh=s, long_edge=le, fill_body=fb, fill_close=fc)
             thumb = _fit(_on_checker(res).convert("RGB"), (tile, tile))
             x0 = pad + ci * cell_w
             y0 = pad + ri * cell_h
@@ -231,12 +246,42 @@ def sweep(src: Image.Image, out_dir: Path, v_list: list[int], s_list: list[int],
             d.rectangle([tx, ty, tx + tw - 1, ty + th - 1], outline=(170, 170, 170))
             d.text((x0 + 2, y0 + 3), f"v={v} s={s}  {res.size[0]}x{res.size[1]}", fill=(0, 0, 0), font=font)
             print(f"  v={v:>3} s={s:>3} -> {res.size[0]}x{res.size[1]}")
+    _save_sheet(sheet, out_dir)
 
+
+def _save_sheet(sheet: Image.Image, out_dir: Path) -> None:
     sheet_path = out_dir / "sweep.png"
     sheet.save(sheet_path)
     print(f"==> モンタージュ -> {sheet_path}")
     print("    Pi デスクトップで:  xdg-open " + str(sheet_path))
     print("    ブラウザで:        http://raspberrypi.local:8080/tune_out/sweep.png")
+
+
+def sweep_close(src: Image.Image, out_dir: Path, close_list: list[int], v_thresh, s_thresh, long_edge) -> None:
+    """fill_body=True 固定で fill_close を振ったモンタージュ (魚の体を埋める強さの比較)。"""
+    p0 = resolve_params(v_thresh, s_thresh, long_edge, True, None)
+    v, s, le = p0["v_thresh"], p0["s_thresh"], p0["long_edge"]
+    tile = 320
+    label_h = 22
+    pad = 8
+    n = len(close_list)
+    cols = min(n, 3)
+    rows = (n + cols - 1) // cols
+    sheet = Image.new("RGB", (cols * (tile + pad) + pad, rows * (tile + label_h + pad) + pad), (255, 255, 255))
+    d = ImageDraw.Draw(sheet)
+    font = _font(14)
+    print(f"==> fill_close スイープ (fill_body=True, v={v} s={s})")
+    for i, ck in enumerate(close_list):
+        res = remove_white_background(src, v_thresh=v, s_thresh=s, long_edge=le, fill_body=True, fill_close=ck)
+        thumb = _fit(_on_checker(res).convert("RGB"), (tile, tile))
+        ci, ri = i % cols, i // cols
+        x0 = pad + ci * (tile + pad)
+        y0 = pad + ri * (tile + label_h + pad)
+        tw, th = thumb.size
+        sheet.paste(thumb, (x0 + (tile - tw) // 2, y0 + label_h + (tile - th) // 2))
+        d.text((x0 + 2, y0 + 3), f"close={ck}  {res.size[0]}x{res.size[1]}", fill=(0, 0, 0), font=font)
+        print(f"  close={ck:>3} -> {res.size[0]}x{res.size[1]}")
+    _save_sheet(sheet, out_dir)
 
 
 def _paper_detect_visual(src: Image.Image, bbox, *, fit_to=(1900, 1060)) -> Image.Image:
@@ -306,9 +351,16 @@ def main() -> int:
     ap.add_argument("--v-thresh", type=int, help="白除去の value 閾値 (省略時は env/config/既定値)")
     ap.add_argument("--s-thresh", type=int, help="白除去の saturation 閾値 (省略時は env/config/既定値)")
     ap.add_argument("--long-edge", type=int, help="出力長辺 px (省略時は env/config/既定値)")
+    ap.add_argument("--fill-body", dest="fill_body", action="store_const", const=True, default=None,
+                    help="魚の中身 (白く塗り残された体) まで不透明にする (teamLab Sketch Aquarium 風)。省略時は env/config/既定")
+    ap.add_argument("--no-fill-body", dest="fill_body", action="store_const", const=False,
+                    help="魚の中身を埋めず、線画+色+閉じた白だけ残す (開いた輪郭の中は素通し)")
+    ap.add_argument("--fill-close", type=int, help="--fill-body の輪郭隙間を埋める強さ px (省略時は env/config/既定 25)")
     ap.add_argument("--sweep", action="store_true", help="白除去の v×s グリッドを総当たりして sweep.png を出す")
     ap.add_argument("--v-list", type=_parse_int_list, default=_parse_int_list("180,190,200,210,220"), help="--sweep の value 閾値リスト (カンマ区切り)")
     ap.add_argument("--s-list", type=_parse_int_list, default=_parse_int_list("20,30,40,50"), help="--sweep の saturation 閾値リスト (カンマ区切り)")
+    ap.add_argument("--sweep-close", action="store_true", help="fill_body=True 固定で --close-list の各 fill_close を総当たりして sweep.png を出す")
+    ap.add_argument("--close-list", type=_parse_int_list, default=_parse_int_list("10,15,20,25,30,40"), help="--sweep-close の fill_close リスト (カンマ区切り)")
     # HDMI 表示
     ap.add_argument("--show", action="store_true", help="処理後に結果を pi-main の HDMI 画面にフルスクリーン表示する")
     ap.add_argument("--show-target", choices=["detect", "crop", "result", "sweep", "mask"], default="detect",
@@ -350,10 +402,12 @@ def main() -> int:
 
     # 2) 白除去フェーズ (紙面を切り出した後の画像に対して)
     work = src if (args.no_paper_crop or bbox is None) else crop_img
-    if args.sweep:
-        sweep(work, out_dir, args.v_list, args.s_list, args.long_edge)
+    if args.sweep_close:
+        sweep_close(work, out_dir, args.close_list, args.v_thresh, args.s_thresh, args.long_edge)
+    elif args.sweep:
+        sweep(work, out_dir, args.v_list, args.s_list, args.long_edge, args.fill_body, args.fill_close)
     else:
-        single(work, out_dir, args.v_thresh, args.s_thresh, args.long_edge)
+        single(work, out_dir, args.v_thresh, args.s_thresh, args.long_edge, args.fill_body, args.fill_close)
 
     # 3) HDMI 表示
     if args.show:

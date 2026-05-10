@@ -6,16 +6,18 @@ Phase 1 (upload_server.py) と Phase 2/3 (fish_ai_realtime/realtime_loop.py の
 
 本番環境 (固定カメラ + 紙だけが映る撮影ブース) を前提にしたシンプル実装。
 HSV 閾値で「白っぽいピクセル」を判定し、画像の縁から flood fill で繋がる
-部分のみを背景として透明化する (魚の中の目玉等の白は残す)。
+部分のみを背景として透明化する。fill_body=True なら輪郭線の隙間を埋めて
+魚の中身 (白く塗り残された体) も不透明にする (teamLab Sketch Aquarium 風)。
 
-しきい値の決まり方 (優先順):
-  1. 関数引数で明示された値
-  2. 環境変数 GUEST_FISH_V_THRESH / GUEST_FISH_S_THRESH / GUEST_FISH_LONG_EDGE
-  3. 同ディレクトリの config.json (background_removal.* / output.long_edge)
-  4. ハードコードの既定値 (200 / 30 / 600)
+各パラメータの決まり方 (優先順): 関数引数 > 環境変数 > config.json > 既定値。
+  v_thresh    GUEST_FISH_V_THRESH       background_removal.value_threshold       200
+  s_thresh    GUEST_FISH_S_THRESH       background_removal.saturation_threshold   30
+  long_edge   GUEST_FISH_LONG_EDGE      output.long_edge                         600
+  fill_body   GUEST_FISH_FILL_BODY      output.fill_body                       False
+  fill_close  GUEST_FISH_FILL_CLOSE     output.fill_close                         25
+紙面検出側 (detect_paper_bbox) は別途 paper_detect.* / GUEST_FISH_PAPER_* 参照。
 チューニングは web/tune_guest_fish.py で raw 画像に対してオフラインで詰め、
-良い値が出たら config.json か上記 env に反映する (realtime_loop の再起動不要、
-env なら反映即時)。
+良い値が出たら config.json か env に反映する (env なら realtime_loop 再起動だけで即時)。
 """
 
 import json
@@ -27,7 +29,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageOps
 
-_DEFAULTS = {"v_thresh": 200, "s_thresh": 30, "long_edge": 600}
+_DEFAULTS = {"v_thresh": 200, "s_thresh": 30, "long_edge": 600, "fill_body": False, "fill_close": 25}
 _CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 _cfg_cache: dict | None = None
 
@@ -48,6 +50,29 @@ def _as_int(value) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _as_bool(value) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("1", "true", "yes", "on"):
+            return True
+        if v in ("0", "false", "no", "off", ""):
+            return False
+    return None
+
+
+def _resolve_bool(explicit, env_name: str, cfg_path: tuple[str, ...], default: bool) -> bool:
+    """引数 > 環境変数 > config.json > 既定値 の優先順で bool を解決する。"""
+    for cand in (explicit, os.environ.get(env_name), _config_value(cfg_path)):
+        b = _as_bool(cand)
+        if b is not None:
+            return b
+    return default
 
 
 def _config_value(cfg_path: tuple[str, ...]):
@@ -99,12 +124,14 @@ def _parse_margins(value) -> tuple[int, int, int, int] | None:
     return None
 
 
-def resolve_params(v_thresh=None, s_thresh=None, long_edge=None) -> dict:
-    """remove_white_background が実際に使うしきい値を返す (CLI からの確認用)。"""
+def resolve_params(v_thresh=None, s_thresh=None, long_edge=None, fill_body=None, fill_close=None) -> dict:
+    """remove_white_background が実際に使うパラメータを返す (CLI からの確認用)。"""
     return {
         "v_thresh": _resolve_int(v_thresh, "GUEST_FISH_V_THRESH", ("background_removal", "value_threshold"), _DEFAULTS["v_thresh"]),
         "s_thresh": _resolve_int(s_thresh, "GUEST_FISH_S_THRESH", ("background_removal", "saturation_threshold"), _DEFAULTS["s_thresh"]),
         "long_edge": _resolve_int(long_edge, "GUEST_FISH_LONG_EDGE", ("output", "long_edge"), _DEFAULTS["long_edge"]),
+        "fill_body": _resolve_bool(fill_body, "GUEST_FISH_FILL_BODY", ("output", "fill_body"), _DEFAULTS["fill_body"]),
+        "fill_close": _resolve_int(fill_close, "GUEST_FISH_FILL_CLOSE", ("output", "fill_close"), _DEFAULTS["fill_close"]),
     }
 
 
@@ -146,6 +173,38 @@ def compute_bg_mask(rgb: np.ndarray, *, v_thresh: int, s_thresh: int) -> np.ndar
     v, s = _value_saturation(rgb)
     bg_candidate = (v >= v_thresh) & (s <= s_thresh)
     return _edge_connected_bg_mask(bg_candidate)
+
+
+def _largest_component(mask: np.ndarray) -> np.ndarray:
+    """bool マスクの最大連結成分だけ残して返す。空なら元のまま。"""
+    from scipy import ndimage
+    labels, n = ndimage.label(mask)
+    if n <= 1:
+        return mask
+    sizes = ndimage.sum(np.ones_like(labels), labels, index=range(1, n + 1))
+    return labels == (int(np.argmax(sizes)) + 1)
+
+
+def compute_silhouette(rgb: np.ndarray, *, v_thresh: int, s_thresh: int, close_px: int) -> np.ndarray:
+    """魚の「中身まで埋めた」シルエットの bool マスクを返す (teamLab Sketch Aquarium 風)。
+
+    手順: compute_bg_mask で求めた「縁から繋がる白 (= 紙)」の補集合 = インク線画 +
+    色のついた部分 + 縁から繋がっていない白 (目玉等) を出発点に、close_px だけ膨張
+    させて輪郭線の隙間 (開いた口・ヒレの切れ目) を橋渡し → 穴埋め (= 体の内側が埋まる)
+    → 同じだけ収縮させて輪郭の太さを元に戻す → 最大連結成分。close_px が小さいと
+    隙間を埋めきれず中空のまま、大きすぎると細い部分が太る/くっつく。
+    """
+    from scipy import ndimage
+
+    not_bg = ~compute_bg_mask(rgb, v_thresh=v_thresh, s_thresh=s_thresh)
+    k = max(0, int(close_px))
+    if k > 0:
+        grown = ndimage.binary_dilation(not_bg, iterations=k)
+        filled = ndimage.binary_fill_holes(grown)
+        sil = ndimage.binary_erosion(filled, iterations=k, border_value=1)
+    else:
+        sil = ndimage.binary_fill_holes(not_bg)
+    return _largest_component(sil)
 
 
 # ─── 紙面検出 (撮影画像から白い紙のシートだけを切り出す) ──────────
@@ -256,24 +315,34 @@ def remove_white_background(
     v_thresh: int | None = None,
     s_thresh: int | None = None,
     long_edge: int | None = None,
+    fill_body: bool | None = None,
+    fill_close: int | None = None,
 ) -> Image.Image:
-    """HSV 閾値で白っぽいピクセルを抽出 → 縁から繋がる部分のみ透明化 → トリミング & 長辺リサイズ。
+    """白い紙の背景を透明化 → トリミング & 長辺リサイズ。
 
-    しきい値を省略 (None) すると env / config.json / 既定値の順で解決される
-    (モジュール docstring 参照)。本番環境 (固定カメラ + 紙だけが映る撮影
-    ブース) では紙の縁が画像の縁に接するので、シンプルな縁 flood fill で紙
-    全体が背景化される。机や手が映るテスト環境では透明化が不完全になる
-    可能性がある。
+    省略した引数は env / config.json / 既定値の順で解決される (モジュール
+    docstring 参照)。本番環境 (固定カメラ + 紙だけが映る撮影ブース) を前提。
+
+    fill_body=True のときは「縁から繋がる白だけ透明化」ではなく、輪郭線の隙間を
+    fill_close px ぶん橋渡しして閉じ、魚の中身 (白く塗り残された体) まで不透明に
+    する (teamLab Sketch Aquarium 風)。False (既定) なら従来どおり線画 + 色 +
+    閉じた白 (目玉等) だけが残り、開いた輪郭の中は素通しになる。
     """
-    params = resolve_params(v_thresh, s_thresh, long_edge)
+    params = resolve_params(v_thresh, s_thresh, long_edge, fill_body, fill_close)
     v_thresh, s_thresh, long_edge = params["v_thresh"], params["s_thresh"], params["long_edge"]
+    fill_body, fill_close = params["fill_body"], params["fill_close"]
 
     img = ImageOps.exif_transpose(img).convert("RGB")
     rgb = np.array(img)
-    bg_mask = compute_bg_mask(rgb, v_thresh=v_thresh, s_thresh=s_thresh)
 
-    rgba = np.dstack([rgb.astype(np.uint8), np.full(rgb.shape[:2], 255, dtype=np.uint8)])
-    rgba[bg_mask] = [0, 0, 0, 0]
+    if fill_body:
+        sil = compute_silhouette(rgb, v_thresh=v_thresh, s_thresh=s_thresh, close_px=fill_close)
+        alpha = np.where(sil, 255, 0).astype(np.uint8)
+        rgba = np.dstack([rgb.astype(np.uint8), alpha])
+    else:
+        bg_mask = compute_bg_mask(rgb, v_thresh=v_thresh, s_thresh=s_thresh)
+        rgba = np.dstack([rgb.astype(np.uint8), np.full(rgb.shape[:2], 255, dtype=np.uint8)])
+        rgba[bg_mask] = [0, 0, 0, 0]
     out = Image.fromarray(rgba, "RGBA")
 
     bbox = out.getbbox()

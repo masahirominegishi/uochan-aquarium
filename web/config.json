@@ -21,7 +21,10 @@
     "_comment": "紙面を切り出した後の画像に対して、HSV で V >= value_threshold かつ S <= saturation_threshold のピクセルを「白っぽい候補」とみなし、画像の縁から flood fill で繋がる部分のみを背景として透明化する。魚の中の白 (目玉等) は縁から繋がらないので残る"
   },
   "output": {
-    "long_edge": 600
+    "long_edge": 600,
+    "fill_body": true,
+    "fill_close": 25,
+    "_comment": "fill_body=true で魚の中身 (白く塗り残された体) まで不透明にする (teamLab Sketch Aquarium 風)。輪郭線の隙間 (開いた口・ヒレの切れ目) を fill_close px ぶん橋渡しして閉じてから穴埋め。小さいと中空のまま、大きすぎると細い部分が太る/くっつく。2026-05-10 にこのカメラ/絵で要調整。false なら従来どおり線画+色+閉じた白だけ残る。long_edge は出力の長辺 px"
   },
   "upload": {
     "max_bytes": 26214400,
