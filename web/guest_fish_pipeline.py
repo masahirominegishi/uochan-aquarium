@@ -251,6 +251,22 @@ def _largest_component(mask: np.ndarray) -> np.ndarray:
     return labels == (int(np.argmax(sizes)) + 1)
 
 
+def _keep_main_blob(mask: np.ndarray, near_px: int) -> np.ndarray:
+    """最大連結成分 + そこから near_px 以内にある他の成分も残す (= 体に近い独立したヒレ等を捨てない)。
+
+    near_px <= 0 や成分が 1 つなら _largest_component と同じ。離れたゴミ (紙のシミ等) は捨てる。
+    """
+    from scipy import ndimage
+    labels, n = ndimage.label(mask)
+    if n <= 1 or not near_px or near_px <= 0:
+        return _largest_component(mask)
+    sizes = ndimage.sum(np.ones_like(labels), labels, index=range(1, n + 1))
+    biggest = int(np.argmax(sizes)) + 1
+    near = ndimage.binary_dilation(labels == biggest, iterations=int(near_px))
+    keep_labels = np.unique(labels[near & (labels > 0)])
+    return np.isin(labels, keep_labels)
+
+
 def compute_silhouette(rgb: np.ndarray, *, v_thresh: int, s_thresh: int, close_px: int) -> np.ndarray:
     """魚の「中身まで埋めた」シルエットの bool マスクを返す (teamLab Sketch Aquarium 風)。
 
@@ -455,7 +471,8 @@ def fish_mask(rgb: np.ndarray, *, ink_thresh: int, bg_blur: int = 0, close_px: i
         body = ndimage.binary_fill_holes(_largest_component(ink))
     if smooth and smooth > 0:
         body = _smooth_mask(body, smooth)
-    return _largest_component(body | ink)   # ベタ面 + 元のインク全部、魚に繋がる分だけ
+    # ベタ面 + 元のインク全部。体に「近い」独立成分 (体の外に描いた腹びれ等) も残す (= _keep_main_blob)
+    return _keep_main_blob(body | ink, near_px=max(8, int(close_px)))
 
 
 def _crop_and_resize_rgba(rgb: np.ndarray, alpha: np.ndarray, long_edge: int) -> Image.Image:
