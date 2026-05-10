@@ -23,7 +23,9 @@
   "bg_method": "shape",
   "_bg_method_comment": "ゲスト魚の切り抜き方式。'shape' = 形ベース (背景差分でインク検出→輪郭の隙間を膨張で橋渡し→中を満たす→輪郭を整える。輪郭の内側は写真のまま、外だけ透明。露出/色かぶりに強い)。'hsv' = 旧 (HSV しきい値で縁から繋がる白を透明化)。",
   "shape_detect": {
-    "white_balance": true,
+    "autocontrast": true,
+    "autocontrast_cutoff": 1,
+    "white_balance": false,
     "wb_target": 245,
     "levels_black": 0,
     "levels_white": 255,
@@ -32,7 +34,7 @@
     "bg_blur": 0,
     "close_px": 40,
     "smooth": 0.0,
-    "_comment": "shape 方式のパラメータ。white_balance=true で紙の面 (なだらかな照明ムラ/色かぶり/ビネット) を推定して割り wb_target に正規化 (flat-field, 黒インクが黒に・色が正しく・ビネット消える)。その後 levels (Photoshop のレベル補正相当): 入力 [levels_black, levels_white] を [0,255] に伸長 + levels_gamma。levels_black を上げる→暗部/インクが締まり全体が暗く / levels_white を下げる→薄いグレー (ベタッとしたグレー) が白に飛ぶ / levels_gamma<1 で中間調が暗く。ink_thresh = 紙からの局所残差がこれ以上ならインク。bg_blur = 紙の面のメディアンぼかし ksize (0=自動)。close_px = 輪郭の隙間を橋渡しする膨張量 px。元インク (輪郭線/色/尖り) は close_px/smooth に関わらず必ず足し戻す。smooth = ベタ面の縁を approxPolyDP で整える epsilon を周長の何% (0=シャープ)。撮影 EV は -0.7。2026-05-10 にこのカメラ/絵で要調整。"
+    "_comment": "shape 方式のパラメータ。色補正: autocontrast=true で PIL.ImageOps.autocontrast 相当 (各チャンネルのヒストグラムを [0,255] に伸長 = オートホワイトバランス+オートレベル、紙が白に・インクが黒に・色かぶり消える)、autocontrast_cutoff = 上下それぞれ何% の外れ値を無視するか (大きいほど強く飛ばす)。white_balance=true で紙の面で割る flat-field 正規化 (ビネット=周辺の暗がりも消える。autocontrast と併用可)、wb_target = flat-field 後の紙の明るさ。levels_black/white/gamma = Photoshop のレベル補正相当 (入力 [black,white] を [0,255] に伸長 + gamma。0/255/1.0 = しない)。検出: ink_thresh = 紙からの局所残差がこれ以上ならインク。bg_blur = 紙の面のメディアンぼかし ksize (0=自動)。close_px = 輪郭の隙間を橋渡しする膨張量 px。元インク (輪郭線/色/尖り) は close_px/smooth に関わらず必ず足し戻す。smooth = ベタ面の縁を approxPolyDP で整える epsilon を周長の何% (0=シャープ)。撮影 EV は -0.8。2026-05-10 にこのカメラ/絵で要調整。"
   },
   "background_removal": {
     "value_threshold": 200,

@@ -223,7 +223,8 @@ def _mask_overlay(src_rgb: np.ndarray, removed: np.ndarray) -> Image.Image:
 
 def _params_brief(p: dict) -> str:
     if p["bg_method"] == "shape":
-        return (f"bg_method=shape white_balance={p['white_balance']} wb_target={p['wb_target']} "
+        return (f"bg_method=shape autocontrast={p['autocontrast']}(cutoff={p['autocontrast_cutoff']}) "
+                f"white_balance={p['white_balance']} wb_target={p['wb_target']} "
                 f"levels(black={p['levels_black']} white={p['levels_white']} gamma={p['levels_gamma']}) "
                 f"ink_thresh={p['ink_thresh']} bg_blur={p['bg_blur']} close_px={p['close_px']} smooth={p['smooth']} long_edge={p['long_edge']}")
     return f"bg_method=hsv v_thresh={p['v_thresh']} s_thresh={p['s_thresh']} fill_body={p['fill_body']} fill_close={p['fill_close']} long_edge={p['long_edge']}"
@@ -249,8 +250,9 @@ def single(src: Image.Image, out_dir: Path, **kw) -> None:
 
     if p["bg_method"] == "shape":
         src_rgb = prepare_rgb(src, white_balance=p["white_balance"], wb_target=p["wb_target"], bg_blur=p["bg_blur"],
-                              levels_black=p["levels_black"], levels_white=p["levels_white"], levels_gamma=p["levels_gamma"])
-        Image.fromarray(src_rgb, "RGB").save(out_dir / "wb_preview.jpg", quality=92)  # 正規化+レベル補正後の見た目
+                              levels_black=p["levels_black"], levels_white=p["levels_white"], levels_gamma=p["levels_gamma"],
+                              autocontrast=p["autocontrast"], autocontrast_cutoff=p["autocontrast_cutoff"])
+        Image.fromarray(src_rgb, "RGB").save(out_dir / "wb_preview.jpg", quality=92)  # 色補正後の見た目
         ink = ink_mask(src_rgb, thresh=p["ink_thresh"], blur=p["bg_blur"])
         fm = fish_mask(src_rgb, ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"], close_px=p["close_px"], smooth=p["smooth"])
         _shape_mask_overlay(src_rgb, ink, fm).save(out_dir / "mask_overlay.png")
@@ -330,47 +332,61 @@ def sweep_close(src: Image.Image, out_dir: Path, close_list: list[int], **kw) ->
     _montage(cells, out_dir, cols=min(len(close_list), 3))
 
 
-def sweep_levels(src: Image.Image, out_dir: Path, black_list: list[int], **kw) -> None:
-    """shape 固定で levels_black を振ったモンタージュ (= 全体の明るさ/締まりを比較)。"""
+def _shape_kw(p: dict, **over) -> dict:
+    """shape の remove_white_background 用 kw を p から組み立て、over で上書き。"""
+    base = {k: p[k] for k in ("autocontrast", "autocontrast_cutoff", "white_balance", "wb_target",
+                              "levels_black", "levels_white", "levels_gamma", "ink_thresh", "bg_blur",
+                              "close_px", "smooth", "long_edge")}
+    base["bg_method"] = "shape"
+    base.update(over)
+    return base
+
+
+def sweep_cutoff(src: Image.Image, out_dir: Path, cutoff_list: list[int], **kw) -> None:
+    """shape 固定で自動色補正 (autocontrast) の cutoff を振ったモンタージュ。大きいほど強く色を伸長・飛ばす。"""
     p = resolve_params(**kw)
     cells = []
-    print(f"==> levels_black スイープ (shape, levels_white={p['levels_white']} wb_target={p['wb_target']})")
+    print("==> autocontrast cutoff スイープ (shape)")
+    for c in cutoff_list:
+        res = remove_white_background(src, **_shape_kw(p, autocontrast=True, autocontrast_cutoff=c,
+                                                       white_balance=False, levels_black=0, levels_white=255, levels_gamma=1.0))
+        cells.append((f"cutoff={c}  {res.size[0]}x{res.size[1]}", res))
+        print(f"  cutoff={c:>2} -> {res.size[0]}x{res.size[1]}")
+    _montage(cells, out_dir, cols=min(len(cutoff_list), 5))
+
+
+def sweep_levels(src: Image.Image, out_dir: Path, black_list: list[int], **kw) -> None:
+    """shape 固定・autocontrast off で levels_black を振ったモンタージュ。"""
+    p = resolve_params(**kw)
+    cells = []
+    print(f"==> levels_black スイープ (shape, autocontrast=off, levels_white={p['levels_white']} wb_target={p['wb_target']})")
     for bk in black_list:
-        res = remove_white_background(src, bg_method="shape", white_balance=p["white_balance"], wb_target=p["wb_target"],
-                                      levels_black=bk, levels_white=p["levels_white"], levels_gamma=p["levels_gamma"],
-                                      ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"], close_px=p["close_px"],
-                                      smooth=p["smooth"], long_edge=p["long_edge"])
+        res = remove_white_background(src, **_shape_kw(p, autocontrast=False, levels_black=bk))
         cells.append((f"levels_black={bk}  {res.size[0]}x{res.size[1]}", res))
         print(f"  levels_black={bk:>3} -> {res.size[0]}x{res.size[1]}")
     _montage(cells, out_dir, cols=min(len(black_list), 4))
 
 
 def sweep_wb(src: Image.Image, out_dir: Path, wb_list: list[int], **kw) -> None:
-    """shape 固定・レベル補正なしで wb_target (= 正規化後の紙の明るさ = 全体の基本の明るさ) を振ったモンタージュ。"""
+    """shape 固定・autocontrast off・レベル補正なしで wb_target を振ったモンタージュ (基本の明るさ)。"""
     p = resolve_params(**kw)
     cells = []
-    print(f"==> wb_target スイープ (shape, レベル補正なし)")
+    print("==> wb_target スイープ (shape, autocontrast=off, レベル補正なし)")
     for wt in wb_list:
-        res = remove_white_background(src, bg_method="shape", white_balance=True, wb_target=wt,
-                                      levels_black=0, levels_white=255, levels_gamma=1.0,
-                                      ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"], close_px=p["close_px"],
-                                      smooth=p["smooth"], long_edge=p["long_edge"])
+        res = remove_white_background(src, **_shape_kw(p, autocontrast=False, white_balance=True, wb_target=wt,
+                                                       levels_black=0, levels_white=255, levels_gamma=1.0))
         cells.append((f"wb_target={wt}  {res.size[0]}x{res.size[1]}", res))
         print(f"  wb_target={wt:>3} -> {res.size[0]}x{res.size[1]}")
     _montage(cells, out_dir, cols=5)
 
 
 def sweep_levels_white(src: Image.Image, out_dir: Path, white_list: list[int], **kw) -> None:
-    """shape 固定で levels_white (白点) を振ったモンタージュ (= 「グレーの部分をどこまで白に引き上げるか」を比較)。
-    levels_black は 0 固定 (暗部/色には触らない)。先に flat-field 正規化が効いている前提。"""
+    """shape 固定・autocontrast off で levels_white (白点) を振ったモンタージュ (グレーをどこまで白に)。levels_black=0 固定。"""
     p = resolve_params(**kw)
     cells = []
-    print(f"==> levels_white スイープ (shape, white_balance={p['white_balance']} wb_target={p['wb_target']}, levels_black=0)")
+    print(f"==> levels_white スイープ (shape, autocontrast=off, white_balance={p['white_balance']} wb_target={p['wb_target']}, levels_black=0)")
     for wt in white_list:
-        res = remove_white_background(src, bg_method="shape", white_balance=p["white_balance"], wb_target=p["wb_target"],
-                                      levels_black=0, levels_white=wt, levels_gamma=1.0,
-                                      ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"], close_px=p["close_px"],
-                                      smooth=p["smooth"], long_edge=p["long_edge"])
+        res = remove_white_background(src, **_shape_kw(p, autocontrast=False, levels_black=0, levels_white=wt, levels_gamma=1.0))
         cells.append((f"levels_white={wt}  {res.size[0]}x{res.size[1]}", res))
         print(f"  levels_white={wt:>3} -> {res.size[0]}x{res.size[1]}")
     _montage(cells, out_dir, cols=min(len(white_list), 5))
@@ -442,11 +458,15 @@ def main() -> int:
     # 切り抜き方式
     ap.add_argument("--bg-method", choices=["shape", "hsv"], dest="bg_method", default=None,
                     help="shape=形ベース(背景差分→輪郭を閉じる→中を満たす→輪郭整え) / hsv=旧 白除去。省略時は config/既定(shape)")
-    # shape 用
+    # shape 用 — 色補正
+    ap.add_argument("--autocontrast", dest="autocontrast", action="store_const", const=True, default=None,
+                    help="自動色補正 (PIL.ImageOps.autocontrast 相当: 各チャンネルを伸長 = オートホワイトバランス+オートレベル)。省略時 config/既定(on)")
+    ap.add_argument("--no-autocontrast", dest="autocontrast", action="store_const", const=False, help="自動色補正をしない")
+    ap.add_argument("--autocontrast-cutoff", type=int, dest="autocontrast_cutoff", help="autocontrast の cutoff %% (省略時 config/既定 1)。大きいほど強く飛ばす")
     ap.add_argument("--white-balance", dest="white_balance", action="store_const", const=True, default=None,
-                    help="紙で正規化 (flat-field: ビネット/色かぶりを消す、黒インクを黒に)。省略時 config/既定(on)")
-    ap.add_argument("--no-white-balance", dest="white_balance", action="store_const", const=False, help="紙の正規化をしない")
-    ap.add_argument("--wb-target", type=int, dest="wb_target", help="正規化後の紙の明るさ (省略時 config/既定 245)。低いほど暗め")
+                    help="紙で正規化 (flat-field: ビネット/色かぶり/周辺の暗がりを消す)。省略時 config/既定(off)。autocontrast と併用可")
+    ap.add_argument("--no-white-balance", dest="white_balance", action="store_const", const=False, help="flat-field 正規化をしない")
+    ap.add_argument("--wb-target", type=int, dest="wb_target", help="flat-field 後の紙の明るさ (省略時 config/既定 245)。低いほど暗め")
     ap.add_argument("--levels-black", type=int, dest="levels_black", help="レベル補正の黒点 (省略時 config/既定 20)。上げるほどインク/暗部が締まり全体が暗く")
     ap.add_argument("--levels-white", type=int, dest="levels_white", help="レベル補正の白点 (省略時 config/既定 225)。下げるほど薄いグレーが白に飛ぶ")
     ap.add_argument("--levels-gamma", type=float, dest="levels_gamma", help="レベル補正の中間調 gamma (省略時 config/既定 1.0、<1 で暗く)")
@@ -477,6 +497,8 @@ def main() -> int:
     ap.add_argument("--ev-list", type=_parse_float_list, default=_parse_float_list("-2.4,-2.0,-1.6,-1.2,-0.8,-0.4,0.0,0.4,0.8,1.2"), help="--sweep-ev の EV リスト")
     ap.add_argument("--sweep-levels-white", action="store_true", help="[shape] --levels-white-list を振ったモンタージュ (グレーをどこまで白に引き上げるか比較。levels_black=0 固定)")
     ap.add_argument("--levels-white-list", type=_parse_int_list, default=_parse_int_list("255,235,220,208"), help="--sweep-levels-white の levels_white リスト")
+    ap.add_argument("--sweep-cutoff", action="store_true", help="[shape] 自動色補正の cutoff を --cutoff-list で振ったモンタージュ")
+    ap.add_argument("--cutoff-list", type=_parse_int_list, default=_parse_int_list("0,1,2,3,5,8,12,18,25,35"), help="--sweep-cutoff の cutoff リスト")
     # HDMI 表示
     ap.add_argument("--show", action="store_true", help="処理後に結果を pi-main の HDMI 画面にフルスクリーン表示する")
     ap.add_argument("--show-target", choices=["detect", "crop", "result", "sweep", "mask", "wb"], default="result",
@@ -527,12 +549,15 @@ def main() -> int:
 
     # 2) 切り抜きフェーズ (紙面を切り出した後の画像に対して)
     work = src if (args.no_paper_crop or bbox is None) else crop_img
-    proc_kw = dict(bg_method=args.bg_method, white_balance=args.white_balance, wb_target=args.wb_target,
+    proc_kw = dict(bg_method=args.bg_method, autocontrast=args.autocontrast, autocontrast_cutoff=args.autocontrast_cutoff,
+                   white_balance=args.white_balance, wb_target=args.wb_target,
                    levels_black=args.levels_black, levels_white=args.levels_white, levels_gamma=args.levels_gamma,
                    ink_thresh=args.ink_thresh, bg_blur=args.bg_blur, close_px=args.close_px, smooth=args.smooth,
                    v_thresh=args.v_thresh, s_thresh=args.s_thresh, fill_body=args.fill_body, fill_close=args.fill_close,
                    long_edge=args.long_edge)
-    if args.sweep_wb:
+    if args.sweep_cutoff:
+        sweep_cutoff(work, out_dir, args.cutoff_list, **proc_kw)
+    elif args.sweep_wb:
         sweep_wb(work, out_dir, args.wb_list, **proc_kw)
     elif args.sweep_levels_white:
         sweep_levels_white(work, out_dir, args.levels_white_list, **proc_kw)

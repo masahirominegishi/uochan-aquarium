@@ -40,8 +40,13 @@ from PIL import Image, ImageDraw, ImageOps
 _DEFAULTS = {
     "bg_method": "shape",   # "shape" = 形ベース (背景差分→輪郭を閉じる→中を満たす→輪郭整える) / "hsv" = 旧 白除去
     # shape 用
-    "white_balance": True,  # 紙の面 (なだらかな照明ムラ/色かぶり/ビネット) で割って正規化 (flat-field)。黒インクが黒に、色が正しく出る
-    "wb_target": 245,       # 正規化後の紙の明るさ。低いほど全体が暗め
+    # autocontrast: PIL.ImageOps.autocontrast 相当の自動色補正 (各チャンネルのヒストグラムを [0,255] に伸長)。
+    #   = オートホワイトバランス + オートレベル を 1 発で。紙が白に、インクが黒に、色かぶりが消える。
+    #   cutoff = 上下それぞれ何 % の外れ値を無視するか (大きいほど強く飛ばす)。
+    "autocontrast": True,
+    "autocontrast_cutoff": 1,
+    "white_balance": False,  # 紙の面で割る flat-field 正規化 (ビネット = 周辺の暗がりも消える)。autocontrast と併用も可
+    "wb_target": 245,       # flat-field 後の紙の明るさ。低いほど暗め
     # レベル補正 (flat-field の後、Photoshop の「レベル」相当: 入力 [black,white] を [0,255] に伸長 + gamma)
     "levels_black": 0,      # これ以下は黒に。上げるほどインク/暗部が締まり全体が暗く (= レベル補正。0 = しない)
     "levels_white": 255,    # これ以上は白に。下げるほど薄いグレーが白に飛ぶ (= レベル補正。255 = しない)
@@ -169,11 +174,14 @@ def _parse_margins(value) -> tuple[int, int, int, int] | None:
 
 def resolve_params(v_thresh=None, s_thresh=None, long_edge=None, fill_body=None, fill_close=None,
                    bg_method=None, ink_thresh=None, bg_blur=None, close_px=None, smooth=None,
-                   white_balance=None, wb_target=None, levels_black=None, levels_white=None, levels_gamma=None) -> dict:
+                   white_balance=None, wb_target=None, levels_black=None, levels_white=None, levels_gamma=None,
+                   autocontrast=None, autocontrast_cutoff=None) -> dict:
     """remove_white_background / cutout_guest_fish が実際に使うパラメータを 引数 > env > config > 既定 で解決して返す。"""
     return {
         "bg_method": _resolve_str(bg_method, "GUEST_FISH_BG_METHOD", ("bg_method",), _DEFAULTS["bg_method"]),
         # shape
+        "autocontrast": _resolve_bool(autocontrast, "GUEST_FISH_AUTOCONTRAST", ("shape_detect", "autocontrast"), _DEFAULTS["autocontrast"]),
+        "autocontrast_cutoff": _resolve_int(autocontrast_cutoff, "GUEST_FISH_AUTOCONTRAST_CUTOFF", ("shape_detect", "autocontrast_cutoff"), _DEFAULTS["autocontrast_cutoff"]),
         "white_balance": _resolve_bool(white_balance, "GUEST_FISH_WHITE_BALANCE", ("shape_detect", "white_balance"), _DEFAULTS["white_balance"]),
         "wb_target": _resolve_int(wb_target, "GUEST_FISH_WB_TARGET", ("shape_detect", "wb_target"), _DEFAULTS["wb_target"]),
         "levels_black": _resolve_int(levels_black, "GUEST_FISH_LEVELS_BLACK", ("shape_detect", "levels_black"), _DEFAULTS["levels_black"]),
@@ -392,41 +400,29 @@ def _crop_and_resize_rgba(rgb: np.ndarray, alpha: np.ndarray, long_edge: int) ->
     return out
 
 
-def prepare_rgb(img: Image.Image, *, white_balance=None, wb_target=None, bg_blur=None,
-                levels_black=None, levels_white=None, levels_gamma=None) -> np.ndarray:
-    """切り抜き前処理: EXIF 補正 + RGB 化 + (white_balance なら) 紙で正規化 + レベル補正した RGB 配列を返す。
+def prepare_rgb(img: Image.Image, **kw) -> np.ndarray:
+    """切り抜き前処理: EXIF 補正 + RGB 化 + (white_balance なら flat-field) + レベル補正 + (autocontrast なら自動色補正)
+    した RGB 配列を返す。kw は resolve_params に渡す (bg_blur / white_balance / wb_target / levels_* / autocontrast*)。
 
     tune_guest_fish.py がマスク可視化を本処理と同じ画像で行うために共有する。
     """
-    p = resolve_params(bg_blur=bg_blur, white_balance=white_balance, wb_target=wb_target, bg_method="shape",
-                       levels_black=levels_black, levels_white=levels_white, levels_gamma=levels_gamma)
+    p = resolve_params(bg_method="shape", **kw)
     rgb = np.array(ImageOps.exif_transpose(img).convert("RGB"))
     if p["white_balance"]:
         rgb = flat_field(rgb, blur=p["bg_blur"], target=p["wb_target"])
     rgb = levels(rgb, black=p["levels_black"], white=p["levels_white"], gamma=p["levels_gamma"])
+    if p["autocontrast"]:
+        rgb = np.array(ImageOps.autocontrast(Image.fromarray(rgb), cutoff=max(0, int(p["autocontrast_cutoff"])),
+                                             preserve_tone=False))
     return rgb
 
 
-def cutout_guest_fish(
-    img: Image.Image,
-    *,
-    white_balance: bool | None = None,
-    wb_target: int | None = None,
-    levels_black: int | None = None,
-    levels_white: int | None = None,
-    levels_gamma: float | None = None,
-    ink_thresh: int | None = None,
-    bg_blur: int | None = None,
-    close_px: int | None = None,
-    smooth: float | None = None,
-    long_edge: int | None = None,
-) -> Image.Image:
-    """形ベースで魚を切り抜いた RGBA を返す。輪郭の内側は (WB + レベル補正後の) 写真のまま、外側は透明。"""
-    p = resolve_params(long_edge=long_edge, bg_method="shape", ink_thresh=ink_thresh, bg_blur=bg_blur,
-                       close_px=close_px, smooth=smooth, white_balance=white_balance, wb_target=wb_target,
-                       levels_black=levels_black, levels_white=levels_white, levels_gamma=levels_gamma)
+def cutout_guest_fish(img: Image.Image, **kw) -> Image.Image:
+    """形ベースで魚を切り抜いた RGBA を返す。輪郭の内側は前処理後の写真のまま、外側は透明。kw は resolve_params 用。"""
+    p = resolve_params(bg_method="shape", **kw)
     rgb = prepare_rgb(img, white_balance=p["white_balance"], wb_target=p["wb_target"], bg_blur=p["bg_blur"],
-                      levels_black=p["levels_black"], levels_white=p["levels_white"], levels_gamma=p["levels_gamma"])
+                      levels_black=p["levels_black"], levels_white=p["levels_white"], levels_gamma=p["levels_gamma"],
+                      autocontrast=p["autocontrast"], autocontrast_cutoff=p["autocontrast_cutoff"])
     mask = fish_mask(rgb, ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"], close_px=p["close_px"], smooth=p["smooth"])
     alpha = np.where(mask, 255, 0).astype(np.uint8)
     return _crop_and_resize_rgba(rgb, alpha, p["long_edge"])
@@ -534,48 +530,24 @@ def crop_to_paper(
     return img.crop(bbox), bbox
 
 
-def remove_white_background(
-    img: Image.Image,
-    *,
-    bg_method: str | None = None,
-    # shape 用
-    white_balance: bool | None = None,
-    wb_target: int | None = None,
-    levels_black: int | None = None,
-    levels_white: int | None = None,
-    levels_gamma: float | None = None,
-    ink_thresh: int | None = None,
-    bg_blur: int | None = None,
-    close_px: int | None = None,
-    smooth: float | None = None,
-    # hsv 用 (旧)
-    v_thresh: int | None = None,
-    s_thresh: int | None = None,
-    fill_body: bool | None = None,
-    fill_close: int | None = None,
-    # 共通
-    long_edge: int | None = None,
-) -> Image.Image:
+def remove_white_background(img: Image.Image, **kw) -> Image.Image:
     """ゲスト魚を切り抜いた RGBA を返す。bg_method ("shape" 既定 / "hsv") で方式を選ぶ。
 
-    省略した引数は env / config.json / 既定値の順で解決される (モジュール docstring 参照)。
+    kw は resolve_params に渡す (省略したものは env / config.json / 既定値で解決。モジュール docstring 参照)。
     本番 (固定カメラ + 紙だけが映る撮影ブース) を前提。
 
-    - "shape": (white_balance なら) 紙で正規化 → 背景差分でインクを拾い → 輪郭の隙間を close_px で
-      橋渡し → 中を満たし → ベタ面を smooth で整える + 元インク足し戻し。輪郭の内側は写真のまま、外側は透明。
+    - "shape": 自動色補正 (autocontrast) や紙の正規化 (white_balance/flat-field) で色を整え → 背景差分で
+      インクを拾い → 輪郭の隙間を close_px で橋渡し → 中を満たし → ベタ面を smooth で整える + 元インク足し戻し。
+      輪郭の内側は前処理後の写真のまま、外側は透明。
     - "hsv" (旧): HSV しきい値で「縁から繋がる白」を透明化。fill_body=True なら魚の中身も埋める。
     """
-    params = resolve_params(v_thresh, s_thresh, long_edge, fill_body, fill_close,
-                            bg_method, ink_thresh, bg_blur, close_px, smooth, white_balance, wb_target,
-                            levels_black, levels_white, levels_gamma)
+    params = resolve_params(**kw)
     long_edge = params["long_edge"]
 
     if params["bg_method"] == "shape":
-        return cutout_guest_fish(img, white_balance=params["white_balance"], wb_target=params["wb_target"],
-                                 levels_black=params["levels_black"], levels_white=params["levels_white"],
-                                 levels_gamma=params["levels_gamma"], ink_thresh=params["ink_thresh"],
-                                 bg_blur=params["bg_blur"], close_px=params["close_px"], smooth=params["smooth"],
-                                 long_edge=long_edge)
+        return cutout_guest_fish(img, **{k: params[k] for k in (
+            "white_balance", "wb_target", "levels_black", "levels_white", "levels_gamma",
+            "autocontrast", "autocontrast_cutoff", "ink_thresh", "bg_blur", "close_px", "smooth", "long_edge")})
 
     # ── 旧 HSV 方式 ──
     v_thresh, s_thresh = params["v_thresh"], params["s_thresh"]
