@@ -203,6 +203,37 @@ def resolve_params(v_thresh=None, s_thresh=None, long_edge=None, fill_body=None,
     }
 
 
+_CAPTURE_DEFAULTS = {"ev": -0.8, "awb": "custom", "awbgains": "1.65,1.20", "rotation": 180, "width": 1640, "height": 1232}
+
+
+def capture_params() -> dict:
+    """ゲスト魚を撮る rpicam-still のパラメータ (ev / awb / awbgains / rotation / width / height) を
+    config.json の "capture" セクション > 既定 で解決して返す。realtime_loop / tune_guest_fish が共有する。
+
+    awbgains は config 上はリスト [r,b] でも文字列 "r,b" でも可。返り値は "r,b" 文字列に正規化。
+    """
+    cfg = _config_value(("capture",)) or {}
+    out = {}
+    for key, default in _CAPTURE_DEFAULTS.items():
+        v = cfg.get(key) if isinstance(cfg, dict) else None
+        if key == "awbgains":
+            if isinstance(v, (list, tuple)) and len(v) == 2:
+                out[key] = f"{v[0]},{v[1]}"
+            elif isinstance(v, str) and v.strip():
+                out[key] = v.strip()
+            else:
+                out[key] = default
+        elif key in ("rotation", "width", "height"):
+            iv = _as_int(v)
+            out[key] = iv if iv is not None else default
+        elif key == "ev":
+            fv = _as_float(v)
+            out[key] = fv if fv is not None else default
+        else:  # awb
+            out[key] = v.strip() if isinstance(v, str) and v.strip() else default
+    return out
+
+
 # ─── 背景除去 ──────────────────────────────────────────
 def _edge_connected_bg_mask(bg_candidate: np.ndarray) -> np.ndarray:
     """画像の縁から到達できる白領域のみを背景とみなして mask を返す。

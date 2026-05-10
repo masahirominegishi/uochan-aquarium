@@ -29,7 +29,7 @@ from pathlib import Path
 from aiohttp import web
 from PIL import Image
 
-from guest_fish_pipeline import append_fish, new_fish_id, remove_white_background
+from guest_fish_pipeline import append_fish, crop_to_paper, new_fish_id, remove_white_background
 
 
 # ─── 設定 ─────────────────────────────────────────────
@@ -148,18 +148,15 @@ async def api_upload_handler(request: web.Request) -> web.Response:
         return web.json_response({"error": "画像として読めませんでした"}, status=400)
 
     loop = asyncio.get_running_loop()
+
+    def _process(im):
+        cropped, _ = crop_to_paper(im, margins=0)   # 周囲の余白/机を落として紙面に (アップロード写真は歪み補正の負 margin 不要なので 0)
+        return remove_white_background(cropped, v_thresh=V_THRESH, s_thresh=S_THRESH, long_edge=LONG_EDGE)
+
     try:
-        processed = await loop.run_in_executor(
-            None,
-            lambda: remove_white_background(
-                img,
-                v_thresh=V_THRESH,
-                s_thresh=S_THRESH,
-                long_edge=LONG_EDGE,
-            ),
-        )
+        processed = await loop.run_in_executor(None, lambda: _process(img))
     except Exception as e:
-        log.exception("背景除去失敗")
+        log.exception("切り抜き失敗")
         return web.json_response({"error": f"処理失敗: {e}"}, status=500)
 
     fish_id = new_fish_id()
