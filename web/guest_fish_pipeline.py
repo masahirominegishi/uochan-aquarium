@@ -15,7 +15,7 @@ bg_method で 2 方式:
   ink_thresh  GUEST_FISH_INK_THRESH     shape_detect.ink_thresh                  28   # shape
   bg_blur     GUEST_FISH_BG_BLUR        shape_detect.bg_blur                      0   # 0=自動
   close_px    GUEST_FISH_CLOSE_PX       shape_detect.close_px                    40
-  smooth      GUEST_FISH_SMOOTH         shape_detect.smooth                     1.5   # ベタ面の縁のみ。インクは常にシャープ
+  smooth      GUEST_FISH_SMOOTH         shape_detect.smooth                     0.0   # 0=整えない (シャープ)
   v_thresh    GUEST_FISH_V_THRESH       background_removal.value_threshold       200   # hsv
   s_thresh    GUEST_FISH_S_THRESH       background_removal.saturation_threshold   30
   fill_body   GUEST_FISH_FILL_BODY      output.fill_body                       False
@@ -41,7 +41,7 @@ _DEFAULTS = {
     "ink_thresh": 28,       # 紙からの局所残差がこれ以上ならインク。下げると薄いインクも拾う/ノイズも拾う
     "bg_blur": 0,           # 紙の面を推定するメディアンぼかしの ksize (0 = 画像サイズから自動)
     "close_px": 40,         # 輪郭の隙間 (開いた口・ヒレ・ペンの途切れ) を橋渡しする膨張量 px。小さいと中が埋まらない、大きすぎると細部がくっつく
-    "smooth": 1.5,          # ベタ面の縁をなめらかにする (approxPolyDP epsilon を周長の何 % か)。0 = なめらかにしない。インク自体はこれに関わらず常にシャープに残る
+    "smooth": 0.0,          # ベタ面の縁をなめらかにする (approxPolyDP epsilon を周長の何 % か)。0 (既定) = なめらかにしない (手描き線をそのままシャープに切る)。インク自体はこれに関わらず常にシャープ
     # hsv 用 (旧)
     "v_thresh": 200, "s_thresh": 30, "fill_body": False, "fill_close": 25,
     # 共通
