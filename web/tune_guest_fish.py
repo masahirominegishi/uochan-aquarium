@@ -298,7 +298,7 @@ def sweep_close(src: Image.Image, out_dir: Path, close_list: list[int], **kw) ->
 
 
 def sweep_levels(src: Image.Image, out_dir: Path, black_list: list[int], **kw) -> None:
-    """shape 固定で levels_black を振ったモンタージュ (= 全体の明るさ/締まりを 4 段階くらい比較)。"""
+    """shape 固定で levels_black を振ったモンタージュ (= 全体の明るさ/締まりを比較)。"""
     p = resolve_params(**kw)
     cells = []
     print(f"==> levels_black スイープ (shape, levels_white={p['levels_white']} wb_target={p['wb_target']})")
@@ -310,6 +310,21 @@ def sweep_levels(src: Image.Image, out_dir: Path, black_list: list[int], **kw) -
         cells.append((f"levels_black={bk}  {res.size[0]}x{res.size[1]}", res))
         print(f"  levels_black={bk:>3} -> {res.size[0]}x{res.size[1]}")
     _montage(cells, out_dir, cols=min(len(black_list), 4))
+
+
+def sweep_wb(src: Image.Image, out_dir: Path, wb_list: list[int], **kw) -> None:
+    """shape 固定・レベル補正なしで wb_target (= 正規化後の紙の明るさ = 全体の基本の明るさ) を振ったモンタージュ。"""
+    p = resolve_params(**kw)
+    cells = []
+    print(f"==> wb_target スイープ (shape, レベル補正なし)")
+    for wt in wb_list:
+        res = remove_white_background(src, bg_method="shape", white_balance=True, wb_target=wt,
+                                      levels_black=0, levels_white=255, levels_gamma=1.0,
+                                      ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"], close_px=p["close_px"],
+                                      smooth=p["smooth"], long_edge=p["long_edge"])
+        cells.append((f"wb_target={wt}  {res.size[0]}x{res.size[1]}", res))
+        print(f"  wb_target={wt:>3} -> {res.size[0]}x{res.size[1]}")
+    _montage(cells, out_dir, cols=5)
 
 
 def _paper_detect_visual(src: Image.Image, bbox, *, fit_to=(1900, 1060)) -> Image.Image:
@@ -405,8 +420,10 @@ def main() -> int:
     ap.add_argument("--s-list", type=_parse_int_list, default=_parse_int_list("20,30,40,50"), help="--sweep の saturation リスト")
     ap.add_argument("--sweep-close", action="store_true", help="--close-list を振ったモンタージュ (shape=close_px / hsv=fill_close)")
     ap.add_argument("--close-list", type=_parse_int_list, default=_parse_int_list("8,12,18,25,35,50"), help="--sweep-close のリスト")
-    ap.add_argument("--sweep-levels", action="store_true", help="[shape] --levels-black-list を振ったモンタージュ (4 段階くらいの明るさ比較)")
+    ap.add_argument("--sweep-levels", action="store_true", help="[shape] --levels-black-list を振ったモンタージュ (明るさ/締まり比較)")
     ap.add_argument("--levels-black-list", type=_parse_int_list, default=_parse_int_list("0,25,50,75"), help="--sweep-levels の levels_black リスト")
+    ap.add_argument("--sweep-wb", action="store_true", help="[shape] --wb-list を振ったモンタージュ (レベル補正なし、基本の明るさを比較)")
+    ap.add_argument("--wb-list", type=_parse_int_list, default=_parse_int_list("90,110,130,150,170,190,210,230,245,255"), help="--sweep-wb の wb_target リスト")
     # HDMI 表示
     ap.add_argument("--show", action="store_true", help="処理後に結果を pi-main の HDMI 画面にフルスクリーン表示する")
     ap.add_argument("--show-target", choices=["detect", "crop", "result", "sweep", "mask", "wb"], default="result",
@@ -453,7 +470,9 @@ def main() -> int:
                    ink_thresh=args.ink_thresh, bg_blur=args.bg_blur, close_px=args.close_px, smooth=args.smooth,
                    v_thresh=args.v_thresh, s_thresh=args.s_thresh, fill_body=args.fill_body, fill_close=args.fill_close,
                    long_edge=args.long_edge)
-    if args.sweep_levels:
+    if args.sweep_wb:
+        sweep_wb(work, out_dir, args.wb_list, **proc_kw)
+    elif args.sweep_levels:
         sweep_levels(work, out_dir, args.levels_black_list, **proc_kw)
     elif args.sweep_close:
         sweep_close(work, out_dir, args.close_list, **proc_kw)

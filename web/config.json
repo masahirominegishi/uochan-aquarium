@@ -25,8 +25,8 @@
   "shape_detect": {
     "white_balance": true,
     "wb_target": 245,
-    "levels_black": 20,
-    "levels_white": 225,
+    "levels_black": 0,
+    "levels_white": 255,
     "levels_gamma": 1.0,
     "ink_thresh": 28,
     "bg_blur": 0,
