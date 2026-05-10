@@ -1,31 +1,40 @@
 #!/usr/bin/env python3
-"""ゲスト魚トリミング (背景除去 + crop) のチューニング用 CLI。
+"""ゲスト魚トリミング (紙面切り出し → 背景除去 → crop) のチューニング用 CLI。
 
-realtime_loop.py を立ち上げずに、撮影 → 背景除去 → トリミング を単体で回して
-しきい値 (v_thresh / s_thresh) を詰めるためのツール。pi-main 上で実行する。
+realtime_loop.py を立ち上げずに、撮影 → 紙面検出 → 白除去 → トリミング を
+単体で回して詰めるためのツール。pi-main 上で実行する。
 
-依存 (numpy / Pillow) は fish_ai_realtime の venv に入っているので、そちらの
-python で起動する:
+処理は 2 段:
+  (1) 紙面検出 (detect_paper_bbox): 撮影画像の周囲に写り込んだ暗いブース枠や
+      画面下部の景色を捨て、白い紙のシートの bbox に crop する。
+  (2) 白除去 (remove_white_background): (1) の中で、絵の線画だけ残して白い
+      紙の部分を透明化し、絵に tight crop + 長辺リサイズ。
+
+依存 (numpy / Pillow / scipy) は fish_ai_realtime の venv に入っているので、
+そちらの python で起動する:
 
   ~/Documents/fish_ai_realtime/.venv/bin/python ~/Documents/aquarium/web/tune_guest_fish.py --help
 
 典型ワークフロー:
-  1. ブースに代表的な絵を置いて撮る (本番と同じ rpicam-still 引数 + --rotation 180、
-     撮影時はブース LED を自動点灯 → ウォームアップ → 撮影 → 消灯。--no-led で抑止):
-       ... tune_guest_fish.py --capture
-     → tune_out/capture_<ts>.jpg と tune_out/latest.jpg に保存
-  2. しきい値スイープ → モンタージュ画像で見比べる:
-       ... tune_guest_fish.py --sweep
-     → tune_out/sweep.png  (Pi デスクトップで xdg-open するか、ブラウザで
-        http://raspberrypi.local:8080/tune_out/sweep.png を開く)
-  3. 単発で詳しく見る (マスク可視化付き):
-       ... tune_guest_fish.py --v-thresh 210 --s-thresh 35
-     → tune_out/result.png (透明部分をチェッカー柄で表示) と
-        tune_out/mask_overlay.png (除去されたピクセルを赤、bbox を緑枠で表示)
+  1. ブースに絵を置いて撮る + 紙面検出結果を HDMI に映して目視確認
+     (撮影時はブース LED を自動点灯 → warmup → 撮影 → 消灯。--no-led で抑止):
+       ... tune_guest_fish.py --capture --show
+     → tune_out/paper_detect.png (元画像に紙面 bbox を緑枠・外側を暗赤で表示) を
+       HDMI にフルスクリーン表示。tune_out/paper_crop.jpg = 切り出した紙面。
+     紙面の取れ方がずれてたら --paper-v / --paper-s / --paper-pad を調整して再実行。
+     (例: 枠が残る → --paper-v を下げる / --paper-pad を負に。絵の端が切れる → --paper-pad を正に)
+  2. 紙面が決まったら白除去のスイープ → モンタージュ:
+       ... tune_guest_fish.py --sweep --show --show-target sweep
+     → tune_out/sweep.png (HDMI 表示)。v×s は --v-list / --s-list で変更可。
+  3. 単発で白除去マスクを詳しく見る:
+       ... tune_guest_fish.py --v-thresh 210 --s-thresh 35 --show --show-target mask
+     → tune_out/result.png / result_on_checker.png / mask_overlay.png (赤=除去 / 緑枠=crop)
   4. 良い値が決まったら反映:
        - 即時 & realtime_loop も含めて効かせる: 起動前に環境変数
-           GUEST_FISH_V_THRESH=210 GUEST_FISH_S_THRESH=35
-       - 恒久化: web/config.json の background_removal.value_threshold 等を編集
+           GUEST_FISH_PAPER_V=160 GUEST_FISH_PAPER_S=90 GUEST_FISH_V_THRESH=210 ...
+       - 恒久化: web/config.json の paper_detect.* / background_removal.* / output.long_edge を編集
+
+--show は chromium --kiosk で pi-main の HDMI に出す。閉じるのは pkill -f 'chromium.*--kiosk'。
 """
 
 import argparse
@@ -40,7 +49,13 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from guest_fish_pipeline import compute_bg_mask, remove_white_background, resolve_params  # noqa: E402
+from guest_fish_pipeline import (  # noqa: E402
+    compute_bg_mask,
+    crop_to_paper,
+    remove_white_background,
+    resolve_paper_params,
+    resolve_params,
+)
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
@@ -224,6 +239,51 @@ def sweep(src: Image.Image, out_dir: Path, v_list: list[int], s_list: list[int],
     print("    ブラウザで:        http://raspberrypi.local:8080/tune_out/sweep.png")
 
 
+def _paper_detect_visual(src: Image.Image, bbox, *, fit_to=(1900, 1060)) -> Image.Image:
+    """元画像を画面サイズに収めて、検出した紙面 bbox を緑枠で、外側を暗く塗った確認用画像。"""
+    base = src.convert("RGB").copy()
+    if bbox is not None:
+        ov = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        d = ImageDraw.Draw(ov)
+        l, t, r, b = bbox
+        # bbox の外側を半透明の暗赤で塗る (= 捨てられる範囲)
+        d.rectangle([0, 0, base.size[0], t], fill=(120, 0, 0, 130))
+        d.rectangle([0, b, base.size[0], base.size[1]], fill=(120, 0, 0, 130))
+        d.rectangle([0, t, l, b], fill=(120, 0, 0, 130))
+        d.rectangle([r, t, base.size[0], b], fill=(120, 0, 0, 130))
+        base = Image.alpha_composite(base.convert("RGBA"), ov).convert("RGB")
+        d2 = ImageDraw.Draw(base)
+        d2.rectangle([l, t, r - 1, b - 1], outline=(0, 235, 0), width=max(3, base.size[0] // 350))
+        label = f"paper bbox = ({l},{t})-({r},{b})  size {r - l}x{b - t}"
+    else:
+        label = "紙面を検出できませんでした (--paper-v / --paper-s を緩めてみてください)"
+    out = _fit(base, fit_to)
+    d3 = ImageDraw.Draw(out)
+    f = _font(20)
+    d3.rectangle([0, 0, out.size[0], 30], fill=(0, 0, 0))
+    d3.text((8, 5), label, fill=(255, 255, 255), font=f)
+    return out
+
+
+def _show_on_hdmi(path: Path) -> None:
+    """pi-main の HDMI 画面に画像をフルスクリーン表示する (chromium --kiosk、Xwayland 経由)。"""
+    env = dict(os.environ)
+    env["DISPLAY"] = ":0"
+    env["XAUTHORITY"] = "/home/mine/.Xauthority"
+    env.setdefault("XDG_RUNTIME_DIR", "/run/user/1000")
+    subprocess.run(["pkill", "-f", "chromium.*--kiosk"], capture_output=True)
+    time.sleep(0.5)
+    cmd = [
+        "chromium", "--kiosk", "--noerrdialogs", "--disable-infobars", "--no-first-run",
+        "--disable-session-crashed-bubble", "--check-for-update-interval=31536000",
+        f"file://{path}",
+    ]
+    subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+    print(f"==> HDMI に表示中: {path}  (閉じるには: pkill -f 'chromium.*--kiosk')")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="ゲスト魚トリミングのチューニング CLI", formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     ap.add_argument("--capture", action="store_true", help="rpicam-still で 1 枚撮って tune_out/latest.jpg に保存してから処理する")
@@ -235,12 +295,22 @@ def main() -> int:
     ap.add_argument("--led-warmup", type=float, default=LED_WARMUP_DEFAULT, help=f"LED 点灯から撮影までの待ち秒数 (既定 {LED_WARMUP_DEFAULT})")
     ap.add_argument("--input", type=Path, help="処理する画像 (既定: tune_out/latest.jpg)")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help=f"出力先 (既定 {DEFAULT_OUT_DIR})")
-    ap.add_argument("--v-thresh", type=int, help="単発実行時の value 閾値 (省略時は env/config/既定値)")
-    ap.add_argument("--s-thresh", type=int, help="単発実行時の saturation 閾値 (省略時は env/config/既定値)")
+    # 紙面検出 (撮影画像から白い紙のシートだけを切り出す)
+    ap.add_argument("--paper-v", type=int, help="紙面検出の value 閾値 (省略時は env/config/既定 170)")
+    ap.add_argument("--paper-s", type=int, help="紙面検出の saturation 閾値 (省略時は env/config/既定 80)")
+    ap.add_argument("--paper-pad", type=int, help="紙面 bbox を広げる px。負で内側に縮める (省略時は env/config/既定 0)")
+    ap.add_argument("--no-paper-crop", action="store_true", help="紙面トリミングをせず、撮影画像そのまま白除去にかける")
+    # 白除去 (紙面を切り出した後、絵だけ残して背景を透明化)
+    ap.add_argument("--v-thresh", type=int, help="白除去の value 閾値 (省略時は env/config/既定値)")
+    ap.add_argument("--s-thresh", type=int, help="白除去の saturation 閾値 (省略時は env/config/既定値)")
     ap.add_argument("--long-edge", type=int, help="出力長辺 px (省略時は env/config/既定値)")
-    ap.add_argument("--sweep", action="store_true", help="v×s グリッドを総当たりして sweep.png を出す")
+    ap.add_argument("--sweep", action="store_true", help="白除去の v×s グリッドを総当たりして sweep.png を出す")
     ap.add_argument("--v-list", type=_parse_int_list, default=_parse_int_list("180,190,200,210,220"), help="--sweep の value 閾値リスト (カンマ区切り)")
     ap.add_argument("--s-list", type=_parse_int_list, default=_parse_int_list("20,30,40,50"), help="--sweep の saturation 閾値リスト (カンマ区切り)")
+    # HDMI 表示
+    ap.add_argument("--show", action="store_true", help="処理後に結果を pi-main の HDMI 画面にフルスクリーン表示する")
+    ap.add_argument("--show-target", choices=["detect", "crop", "result", "sweep", "mask"], default="detect",
+                    help="--show で映すもの: detect=紙面検出の確認画像(既定) / crop=切り出した紙面 / result=白除去後 / sweep=モンタージュ / mask=白除去マスク")
     args = ap.parse_args()
 
     out_dir: Path = args.out_dir
@@ -260,10 +330,41 @@ def main() -> int:
         im.load()
         src = im.copy()
 
-    if args.sweep:
-        sweep(src, out_dir, args.v_list, args.s_list, args.long_edge)
+    # 1) 紙面検出 + crop
+    crop_img, bbox = crop_to_paper(src, v_thresh=args.paper_v, s_thresh=args.paper_s, pad=args.paper_pad)
+    pp = resolve_paper_params(args.paper_v, args.paper_s, args.paper_pad)
+    if bbox is None:
+        print(f"==> 紙面検出: 失敗 (params={pp})。撮影画像そのままを使います。")
     else:
-        single(src, out_dir, args.v_thresh, args.s_thresh, args.long_edge)
+        l, t, r, b = bbox
+        print(f"==> 紙面検出: bbox=({l},{t})-({r},{b}) size {r - l}x{b - t} / 元 {src.size[0]}x{src.size[1]} (params={pp})")
+    detect_path = out_dir / "paper_detect.png"
+    _paper_detect_visual(src, bbox).save(detect_path)
+    crop_path = out_dir / "paper_crop.jpg"
+    crop_img.convert("RGB").save(crop_path, quality=92)
+    print(f"==> 紙面確認画像 -> {detect_path}")
+    print(f"==> 切り出した紙面 -> {crop_path}")
+
+    # 2) 白除去フェーズ (紙面を切り出した後の画像に対して)
+    work = src if (args.no_paper_crop or bbox is None) else crop_img
+    if args.sweep:
+        sweep(work, out_dir, args.v_list, args.s_list, args.long_edge)
+    else:
+        single(work, out_dir, args.v_thresh, args.s_thresh, args.long_edge)
+
+    # 3) HDMI 表示
+    if args.show:
+        target = {
+            "detect": detect_path,
+            "crop": crop_path,
+            "result": out_dir / "result_on_checker.png",
+            "sweep": out_dir / "sweep.png",
+            "mask": out_dir / "mask_overlay.png",
+        }[args.show_target]
+        if target.exists():
+            _show_on_hdmi(target)
+        else:
+            print(f"--show-target {args.show_target} の出力 ({target}) が無いので表示をスキップ", file=sys.stderr)
     return 0
 
 

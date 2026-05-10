@@ -97,6 +97,17 @@ def _edge_connected_bg_mask(bg_candidate: np.ndarray) -> np.ndarray:
     return arr == 128
 
 
+def _value_saturation(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """RGB 配列から HSV の V (= max channel, 0-255) と S (0-255) を返す。"""
+    a = rgb.astype(np.float32)
+    r, g, b = a[..., 0], a[..., 1], a[..., 2]
+    maxc = np.maximum(np.maximum(r, g), b)
+    minc = np.minimum(np.minimum(r, g), b)
+    v = maxc
+    s = np.where(maxc == 0, 0.0, (maxc - minc) / np.maximum(maxc, 1.0) * 255.0)
+    return v, s
+
+
 def compute_bg_mask(rgb: np.ndarray, *, v_thresh: int, s_thresh: int) -> np.ndarray:
     """RGB 配列 (H,W,3) から「背景として透明化されるピクセル」の bool マスクを返す。
 
@@ -104,14 +115,86 @@ def compute_bg_mask(rgb: np.ndarray, *, v_thresh: int, s_thresh: int) -> np.ndar
     画像の縁から flood fill で繋がる部分だけを背景とみなす。tune_guest_fish.py
     がマスク可視化のために直接呼ぶ。
     """
-    a = rgb.astype(np.float32)
-    r, g, b = a[..., 0], a[..., 1], a[..., 2]
-    maxc = np.maximum(np.maximum(r, g), b)
-    minc = np.minimum(np.minimum(r, g), b)
-    v = maxc
-    s = np.where(maxc == 0, 0.0, (maxc - minc) / np.maximum(maxc, 1.0) * 255.0)
+    v, s = _value_saturation(rgb)
     bg_candidate = (v >= v_thresh) & (s <= s_thresh)
     return _edge_connected_bg_mask(bg_candidate)
+
+
+# ─── 紙面検出 (撮影画像から白い紙のシートだけを切り出す) ──────────
+# v_thresh: これ未満の明るさは「紙ではない (暗いブース枠/影/外の景色)」扱い。
+#           上げるほど縁の暗い部分を強くトリミングする。
+# s_thresh: これより彩度が高いと「紙ではない (色フリンジ等)」扱い。下げるほど縁の
+#           色かぶり (赤/ピンクのフチ) を強くトリミングする。中央の色かぶりは縁から
+#           繋がっていないので、しきい値を下げても紙面内には残る。
+# pad:      検出した bbox を外側に広げる px。負で内側に縮める (縁の影を確実に切る用)。
+_PAPER_DEFAULTS = {"v_thresh": 150, "s_thresh": 80, "pad": 0}
+
+
+def resolve_paper_params(v_thresh=None, s_thresh=None, pad=None) -> dict:
+    """detect_paper_bbox が実際に使う値を 引数 > env > config.json > 既定 で解決して返す。"""
+    return {
+        "v_thresh": _resolve_int(v_thresh, "GUEST_FISH_PAPER_V", ("paper_detect", "value_threshold"), _PAPER_DEFAULTS["v_thresh"]),
+        "s_thresh": _resolve_int(s_thresh, "GUEST_FISH_PAPER_S", ("paper_detect", "saturation_threshold"), _PAPER_DEFAULTS["s_thresh"]),
+        "pad": _resolve_int(pad, "GUEST_FISH_PAPER_PAD", ("paper_detect", "pad"), _PAPER_DEFAULTS["pad"]),
+    }
+
+
+def detect_paper_bbox(
+    rgb: np.ndarray,
+    *,
+    v_thresh: int | None = None,
+    s_thresh: int | None = None,
+    pad: int | None = None,
+    min_area_frac: float = 0.04,
+) -> tuple[int, int, int, int] | None:
+    """白い紙のシートだけを囲む bbox (l, t, r, b) を返す。検出できなければ None。
+
+    手順: 「明るくて彩度が低い = きれいな紙」以外のピクセル (暗いブース枠・影・
+    色フリンジ・外の景色) のうち、画像の縁から連結しているものを背景として
+    flood fill で除外する。残った最大連結領域が紙面 (絵のインクは紙の内側に
+    浮いているので一緒に残る)。pad で bbox を外/内に微調整できる。
+    """
+    from scipy import ndimage  # 重い import は遅延
+
+    h, w = rgb.shape[:2]
+    p = resolve_paper_params(v_thresh, s_thresh, pad)
+    v, s = _value_saturation(rgb)
+    clean_paper = (v >= p["v_thresh"]) & (s <= p["s_thresh"])
+    frame = _edge_connected_bg_mask(~clean_paper)   # 縁から繋がる「紙でない」領域 = ブース枠等
+    paper_candidate = ~frame
+    paper_candidate = ndimage.binary_opening(paper_candidate, structure=np.ones((5, 5)))
+    labels, n = ndimage.label(paper_candidate)
+    if n == 0:
+        return None
+    sizes = ndimage.sum(np.ones_like(labels), labels, index=range(1, n + 1))
+    biggest = int(np.argmax(sizes)) + 1
+    if sizes[biggest - 1] < min_area_frac * h * w:
+        return None
+    region = ndimage.binary_fill_holes(labels == biggest)
+    ys, xs = np.where(region)
+    pad_v = p["pad"]
+    l = max(0, int(xs.min()) - pad_v)
+    t = max(0, int(ys.min()) - pad_v)
+    r = min(w, int(xs.max()) + 1 + pad_v)
+    b = min(h, int(ys.max()) + 1 + pad_v)
+    if r - l < 2 or b - t < 2:
+        return None
+    return (l, t, r, b)
+
+
+def crop_to_paper(
+    img: Image.Image,
+    *,
+    v_thresh: int | None = None,
+    s_thresh: int | None = None,
+    pad: int | None = None,
+) -> tuple[Image.Image, tuple[int, int, int, int] | None]:
+    """img を紙面の bbox に crop して (cropped, bbox) を返す。検出できなければ (img, None)。"""
+    rgb = np.array(ImageOps.exif_transpose(img).convert("RGB"))
+    bbox = detect_paper_bbox(rgb, v_thresh=v_thresh, s_thresh=s_thresh, pad=pad)
+    if bbox is None:
+        return img, None
+    return img.crop(bbox), bbox
 
 
 def remove_white_background(
