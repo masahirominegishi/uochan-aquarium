@@ -29,6 +29,7 @@ rsync -av --delete $DRY \
   --exclude '/guest_fish/' \
   --exclude '/guest_fish.json' \
   --exclude '/guest_fish.json.tmp' \
+  --exclude '/tune_out/' \
   "$SRC" "$DEST"
 
 if [ -n "$RESTART" ] && [ -z "$DRY" ]; then

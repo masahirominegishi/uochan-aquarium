@@ -20,3 +20,6 @@ __pycache__/
 /guest_fish/
 /guest_fish.json
 /guest_fish.json.tmp
+
+# tune_guest_fish.py の出力 (撮影 raw / 結果 PNG / モンタージュ)
+/tune_out/
