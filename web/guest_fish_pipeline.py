@@ -484,7 +484,7 @@ def fish_mask(rgb: np.ndarray, *, ink_thresh: int, bg_blur: int = 0, close_px: i
     k = max(0, int(close_px))
     if k > 0:
         bridged = _bridge_endpoint_gaps(ink, max_gap=2 * k)            # 隙間を直線で閉じる (太らせない)
-        cseal = max(2, min(int(k) // 8, 6))                            # 直線で繋ぎ切れなかった極小の隙間用の close (太りは段階2で削る)
+        cseal = max(2, min(int(k) // 3, 12))                           # 直線で繋ぎ切れなかった小さな隙間 (ヒレの開き等) を埋める用の close
         sealed = ndimage.binary_closing(bridged, structure=np.ones((3, 3)), iterations=cseal)
         lc = _largest_component(sealed)
         if ndimage.binary_fill_holes(lc).sum() >= 2.2 * int(lc.sum()):
@@ -496,18 +496,20 @@ def fish_mask(rgb: np.ndarray, *, ink_thresh: int, bg_blur: int = 0, close_px: i
             body = ndimage.binary_fill_holes(body | sealed)            # フォールバックでも閉じたヒレ等を埋める
     else:
         bridged = ink
+        sealed = ink
         body = ndimage.binary_fill_holes(ink)
     if smooth and smooth > 0:
         body = _smooth_mask(body, smooth)
     mask = _keep_main_blob(body | ink, near_px=max(8, k))
 
     if trim_halo:
-        barrier = ndimage.binary_dilation(bridged, iterations=1)       # インク + 橋渡し線 (+1px の余裕)
-        passable = mask & ~barrier                                     # 削れる候補 (白の太り部分 + 体内部)
-        reach = _border_connected((~mask) | passable)                  # 画像の縁 (透明) から passable を通って届く所
-        removable = reach & mask & passable                            # 透明に隣接する白
-        if 0 < removable.sum() < 0.5 * mask.sum():                     # 体内部まで漏れてない場合だけ適用
-            mask = _keep_main_blob((mask & ~removable) | (ink & mask), near_px=max(8, k))
+        # sealed (= インク+橋渡し線+小 close) で囲まれた中身 (体内部・埋めたヒレ) は保護。
+        # 透明から sealed の外側を通って届く「白」(= フォールバックの太り等) だけ削る。
+        passable = mask & ~sealed
+        reach = _border_connected((~mask) | passable)
+        removable = reach & mask & passable
+        if 0 < removable.sum() < 0.5 * mask.sum():
+            mask = _keep_main_blob((mask & ~removable) | sealed, near_px=max(8, k))
     return ndimage.binary_fill_holes(mask)
 
 
