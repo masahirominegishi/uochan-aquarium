@@ -14,8 +14,8 @@ bg_method で 2 方式:
   bg_method   GUEST_FISH_BG_METHOD      bg_method                            "shape"
   ink_thresh  GUEST_FISH_INK_THRESH     shape_detect.ink_thresh                  28   # shape
   bg_blur     GUEST_FISH_BG_BLUR        shape_detect.bg_blur                      0   # 0=自動
-  close_px    GUEST_FISH_CLOSE_PX       shape_detect.close_px                    18
-  smooth      GUEST_FISH_SMOOTH         shape_detect.smooth                     1.0
+  close_px    GUEST_FISH_CLOSE_PX       shape_detect.close_px                    40
+  smooth      GUEST_FISH_SMOOTH         shape_detect.smooth                     0.0   # 0=整えない
   v_thresh    GUEST_FISH_V_THRESH       background_removal.value_threshold       200   # hsv
   s_thresh    GUEST_FISH_S_THRESH       background_removal.saturation_threshold   30
   fill_body   GUEST_FISH_FILL_BODY      output.fill_body                       False
@@ -41,7 +41,7 @@ _DEFAULTS = {
     "ink_thresh": 28,       # 紙からの局所残差がこれ以上ならインク。下げると薄いインクも拾う/ノイズも拾う
     "bg_blur": 0,           # 紙の面を推定するメディアンぼかしの ksize (0 = 画像サイズから自動)
     "close_px": 40,         # 輪郭の隙間 (開いた口・ヒレ・ペンの途切れ) を橋渡しする膨張量 px。小さいと中が埋まらない、大きすぎると細部がくっつく
-    "smooth": 1.0,          # 輪郭整え: approxPolyDP の epsilon を周長の何 % にするか。0 でスムージング無し
+    "smooth": 0.0,          # 輪郭整え: approxPolyDP の epsilon を周長の何 % にするか。0 (既定) = 整えない (手描き線をそのままシャープに切る)
     # hsv 用 (旧)
     "v_thresh": 200, "s_thresh": 30, "fill_body": False, "fill_close": 25,
     # 共通
@@ -306,23 +306,25 @@ def _smooth_mask(mask: np.ndarray, eps_pct: float) -> np.ndarray:
     return out.astype(bool)
 
 
-def fish_mask(rgb: np.ndarray, *, ink_thresh: int, bg_blur: int = 0, close_px: int = 18, smooth: float = 1.0) -> np.ndarray:
+def fish_mask(rgb: np.ndarray, *, ink_thresh: int, bg_blur: int = 0, close_px: int = 40, smooth: float = 0.0) -> np.ndarray:
     """魚の形 (中身まで満たした) の bool マスクを返す。alpha に使う。色 (RGB) は呼び出し側で元のまま。
 
-    インク検出 → close_px だけ膨張で輪郭の隙間を橋渡し → 最大連結成分 → 穴埋め →
-    同じだけ収縮 → 輪郭整え (smooth)。
+    インク検出 → close_px だけ膨張で輪郭の隙間 (開いた口・ヒレ・ペンの途切れ) を橋渡し
+    → 最大連結成分 → 穴埋め → 同じだけ収縮 (= ベタ面の領域) → 元のインクを足し戻す
+    (輪郭線・色・尖った先端を絶対に消さない) → 最大連結成分。smooth>0 のときだけ最後に
+    輪郭をなめらかに簡略化する (既定 0 = しない: 手描き線をそのままシャープに切る)。
     """
     from scipy import ndimage
-    m = ink_mask(rgb, thresh=ink_thresh, blur=bg_blur)
+    ink = ink_mask(rgb, thresh=ink_thresh, blur=bg_blur)
     k = max(0, int(close_px))
     if k > 0:
-        m = ndimage.binary_dilation(m, iterations=k)
-        m = _largest_component(m)
-        m = ndimage.binary_fill_holes(m)
-        m = ndimage.binary_erosion(m, iterations=k, border_value=1)
+        grown = ndimage.binary_dilation(ink, iterations=k)
+        grown = _largest_component(grown)
+        body = ndimage.binary_erosion(ndimage.binary_fill_holes(grown), iterations=k, border_value=1)
     else:
-        m = ndimage.binary_fill_holes(_largest_component(m))
-    return _smooth_mask(m, smooth)
+        body = ndimage.binary_fill_holes(_largest_component(ink))
+    m = _largest_component(body | ink)   # ベタ面 + 元のインク全部、魚に繋がる分だけ
+    return _smooth_mask(m, smooth) if (smooth and smooth > 0) else m
 
 
 def _crop_and_resize_rgba(rgb: np.ndarray, alpha: np.ndarray, long_edge: int) -> Image.Image:
