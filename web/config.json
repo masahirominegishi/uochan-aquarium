@@ -12,7 +12,7 @@
   "paper_detect": {
     "value_threshold": 150,
     "saturation_threshold": 80,
-    "margins": [-75, -80, -30, -80],
+    "margins": [-73, -80, -32, -80],
     "_comment": "撮影画像から白い紙のシートだけを切り出す。明るくて (V>=value_threshold) 彩度の低い (S<=saturation_threshold) 領域以外で、画像の縁から連結しているもの (暗いブース枠/影/外の景色) を flood fill で除外し、残った最大領域を紙面とする。margins=[left,top,right,bottom] は紙面 bbox を各辺に広げる px (負で内側に縮める)。負値はレンズ歪みで四隅に出るボックスのフチを切り落とす用。2026-05-10 にこのカメラ位置・ボックスで [-80,-80,-25,-80] に確定。配置が変わったら tune_guest_fish.py で取り直し。0 / [0,0,0,0] で無効化"
   },
   "background_removal": {
