@@ -50,6 +50,15 @@ def _as_int(value) -> int | None:
         return None
 
 
+def _config_value(cfg_path: tuple[str, ...]):
+    node = _load_config()
+    for key in cfg_path:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(key)
+    return node
+
+
 def _resolve_int(explicit, env_name: str, cfg_path: tuple[str, ...], default: int) -> int:
     """引数 > 環境変数 > config.json > 既定値 の優先順で int を解決する。"""
     if explicit is not None:
@@ -59,16 +68,35 @@ def _resolve_int(explicit, env_name: str, cfg_path: tuple[str, ...], default: in
     v = _as_int(os.environ.get(env_name))
     if v is not None:
         return v
-    node = _load_config()
-    for key in cfg_path:
-        if not isinstance(node, dict):
-            node = None
-            break
-        node = node.get(key)
-    v = _as_int(node)
+    v = _as_int(_config_value(cfg_path))
     if v is not None:
         return v
     return default
+
+
+def _parse_margins(value) -> tuple[int, int, int, int] | None:
+    """margins 指定を (left, top, right, bottom) の 4-tuple に正規化する。
+
+    受け付ける形: None / 数値 (= 4 辺同値) / [l,t,r,b] / "l,t,r,b" / "n"。
+    符号付き (負 = 内側に縮める)。解釈できなければ None。
+    """
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        if len(value) == 4 and all(_as_int(x) is not None for x in value):
+            return tuple(int(x) for x in value)  # type: ignore[return-value]
+        return None
+    if isinstance(value, (int, float)):
+        n = int(value)
+        return (n, n, n, n)
+    if isinstance(value, str):
+        parts = [p for p in value.replace(" ", "").split(",") if p != ""]
+        ints = [_as_int(p) for p in parts]
+        if len(ints) == 1 and ints[0] is not None:
+            return (ints[0], ints[0], ints[0], ints[0])
+        if len(ints) == 4 and all(i is not None for i in ints):
+            return tuple(ints)  # type: ignore[return-value]
+    return None
 
 
 def resolve_params(v_thresh=None, s_thresh=None, long_edge=None) -> dict:
@@ -126,16 +154,39 @@ def compute_bg_mask(rgb: np.ndarray, *, v_thresh: int, s_thresh: int) -> np.ndar
 # s_thresh: これより彩度が高いと「紙ではない (色フリンジ等)」扱い。下げるほど縁の
 #           色かぶり (赤/ピンクのフチ) を強くトリミングする。中央の色かぶりは縁から
 #           繋がっていないので、しきい値を下げても紙面内には残る。
-# pad:      検出した bbox を外側に広げる px。負で内側に縮める (縁の影を確実に切る用)。
-_PAPER_DEFAULTS = {"v_thresh": 150, "s_thresh": 80, "pad": 0}
+# margins:  検出した紙面 bbox を各辺 (left, top, right, bottom) に広げる px。負で
+#           内側に縮める (= レンズ歪みで四隅に出るボックスのフチを確実に切り落とす)。
+#           単一値を与えると 4 辺同値。pad は margins の旧名 (互換用、単一値のみ)。
+_PAPER_DEFAULTS = {"v_thresh": 150, "s_thresh": 80, "margins": (0, 0, 0, 0)}
 
 
-def resolve_paper_params(v_thresh=None, s_thresh=None, pad=None) -> dict:
+def resolve_paper_margins(margins=None, pad=None) -> tuple[int, int, int, int]:
+    """紙面 bbox を広げる量を 引数 margins > env GUEST_FISH_PAPER_MARGINS >
+    config paper_detect.margins > (引数 pad > env GUEST_FISH_PAPER_PAD >
+    config paper_detect.pad) > 既定 の優先順で解決して (l, t, r, b) を返す。"""
+    for cand in (margins, os.environ.get("GUEST_FISH_PAPER_MARGINS"), _config_value(("paper_detect", "margins"))):
+        m = _parse_margins(cand)
+        if m is not None:
+            return m
+    # margins 系が無ければ uniform pad にフォールバック
+    if pad is not None:
+        m = _parse_margins(pad)
+        if m is not None:
+            return m
+    p = _as_int(os.environ.get("GUEST_FISH_PAPER_PAD"))
+    if p is None:
+        p = _as_int(_config_value(("paper_detect", "pad")))
+    if p is not None:
+        return (p, p, p, p)
+    return _PAPER_DEFAULTS["margins"]
+
+
+def resolve_paper_params(v_thresh=None, s_thresh=None, margins=None, pad=None) -> dict:
     """detect_paper_bbox が実際に使う値を 引数 > env > config.json > 既定 で解決して返す。"""
     return {
         "v_thresh": _resolve_int(v_thresh, "GUEST_FISH_PAPER_V", ("paper_detect", "value_threshold"), _PAPER_DEFAULTS["v_thresh"]),
         "s_thresh": _resolve_int(s_thresh, "GUEST_FISH_PAPER_S", ("paper_detect", "saturation_threshold"), _PAPER_DEFAULTS["s_thresh"]),
-        "pad": _resolve_int(pad, "GUEST_FISH_PAPER_PAD", ("paper_detect", "pad"), _PAPER_DEFAULTS["pad"]),
+        "margins": resolve_paper_margins(margins, pad),
     }
 
 
@@ -144,7 +195,8 @@ def detect_paper_bbox(
     *,
     v_thresh: int | None = None,
     s_thresh: int | None = None,
-    pad: int | None = None,
+    margins=None,
+    pad=None,
     min_area_frac: float = 0.04,
 ) -> tuple[int, int, int, int] | None:
     """白い紙のシートだけを囲む bbox (l, t, r, b) を返す。検出できなければ None。
@@ -152,12 +204,12 @@ def detect_paper_bbox(
     手順: 「明るくて彩度が低い = きれいな紙」以外のピクセル (暗いブース枠・影・
     色フリンジ・外の景色) のうち、画像の縁から連結しているものを背景として
     flood fill で除外する。残った最大連結領域が紙面 (絵のインクは紙の内側に
-    浮いているので一緒に残る)。pad で bbox を外/内に微調整できる。
+    浮いているので一緒に残る)。margins (l,t,r,b) で各辺を外/内に微調整できる。
     """
     from scipy import ndimage  # 重い import は遅延
 
     h, w = rgb.shape[:2]
-    p = resolve_paper_params(v_thresh, s_thresh, pad)
+    p = resolve_paper_params(v_thresh, s_thresh, margins, pad)
     v, s = _value_saturation(rgb)
     clean_paper = (v >= p["v_thresh"]) & (s <= p["s_thresh"])
     frame = _edge_connected_bg_mask(~clean_paper)   # 縁から繋がる「紙でない」領域 = ブース枠等
@@ -172,11 +224,11 @@ def detect_paper_bbox(
         return None
     region = ndimage.binary_fill_holes(labels == biggest)
     ys, xs = np.where(region)
-    pad_v = p["pad"]
-    l = max(0, int(xs.min()) - pad_v)
-    t = max(0, int(ys.min()) - pad_v)
-    r = min(w, int(xs.max()) + 1 + pad_v)
-    b = min(h, int(ys.max()) + 1 + pad_v)
+    ml, mt, mr, mb = p["margins"]
+    l = min(max(0, int(xs.min()) - ml), w - 1)
+    t = min(max(0, int(ys.min()) - mt), h - 1)
+    r = max(min(w, int(xs.max()) + 1 + mr), l + 1)
+    b = max(min(h, int(ys.max()) + 1 + mb), t + 1)
     if r - l < 2 or b - t < 2:
         return None
     return (l, t, r, b)
@@ -187,11 +239,12 @@ def crop_to_paper(
     *,
     v_thresh: int | None = None,
     s_thresh: int | None = None,
-    pad: int | None = None,
+    margins=None,
+    pad=None,
 ) -> tuple[Image.Image, tuple[int, int, int, int] | None]:
     """img を紙面の bbox に crop して (cropped, bbox) を返す。検出できなければ (img, None)。"""
     rgb = np.array(ImageOps.exif_transpose(img).convert("RGB"))
-    bbox = detect_paper_bbox(rgb, v_thresh=v_thresh, s_thresh=s_thresh, pad=pad)
+    bbox = detect_paper_bbox(rgb, v_thresh=v_thresh, s_thresh=s_thresh, margins=margins, pad=pad)
     if bbox is None:
         return img, None
     return img.crop(bbox), bbox

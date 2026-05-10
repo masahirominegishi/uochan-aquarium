@@ -297,9 +297,10 @@ def main() -> int:
     ap.add_argument("--input", type=Path, help="処理する画像 (既定: tune_out/latest.jpg)")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help=f"出力先 (既定 {DEFAULT_OUT_DIR})")
     # 紙面検出 (撮影画像から白い紙のシートだけを切り出す)
-    ap.add_argument("--paper-v", type=int, help="紙面検出の value 閾値 (省略時は env/config/既定 170)")
+    ap.add_argument("--paper-v", type=int, help="紙面検出の value 閾値 (省略時は env/config/既定 150)")
     ap.add_argument("--paper-s", type=int, help="紙面検出の saturation 閾値 (省略時は env/config/既定 80)")
-    ap.add_argument("--paper-pad", type=int, help="紙面 bbox を広げる px。負で内側に縮める (省略時は env/config/既定 0)")
+    ap.add_argument("--paper-pad", help="紙面 bbox を 4 辺一律に広げる px。負で内側に縮める (例: -100)")
+    ap.add_argument("--paper-margins", help="紙面 bbox を辺ごとに広げる px 'L,T,R,B' (例: '-90,-90,-40,-90')。負で内側。--paper-pad より優先")
     ap.add_argument("--no-paper-crop", action="store_true", help="紙面トリミングをせず、撮影画像そのまま白除去にかける")
     # 白除去 (紙面を切り出した後、絵だけ残して背景を透明化)
     ap.add_argument("--v-thresh", type=int, help="白除去の value 閾値 (省略時は env/config/既定値)")
@@ -332,13 +333,14 @@ def main() -> int:
         src = im.copy()
 
     # 1) 紙面検出 + crop
-    crop_img, bbox = crop_to_paper(src, v_thresh=args.paper_v, s_thresh=args.paper_s, pad=args.paper_pad)
-    pp = resolve_paper_params(args.paper_v, args.paper_s, args.paper_pad)
+    crop_img, bbox = crop_to_paper(src, v_thresh=args.paper_v, s_thresh=args.paper_s,
+                                   margins=args.paper_margins, pad=args.paper_pad)
+    pp = resolve_paper_params(args.paper_v, args.paper_s, args.paper_margins, args.paper_pad)
     if bbox is None:
         print(f"==> 紙面検出: 失敗 (params={pp})。撮影画像そのままを使います。")
     else:
         l, t, r, b = bbox
-        print(f"==> 紙面検出: bbox=({l},{t})-({r},{b}) size {r - l}x{b - t} / 元 {src.size[0]}x{src.size[1]} (params={pp})")
+        print(f"==> 紙面検出: bbox=({l},{t})-({r},{b}) size {r - l}x{b - t} / 元 {src.size[0]}x{src.size[1]} (margins L,T,R,B={pp['margins']}, v={pp['v_thresh']} s={pp['s_thresh']})")
     detect_path = out_dir / "paper_detect.png"
     _paper_detect_visual(src, bbox).save(detect_path)
     crop_path = out_dir / "paper_crop.jpg"
