@@ -11,11 +11,13 @@ bg_method で 2 方式:
   "hsv" (旧): HSV しきい値で「縁から繋がる白」を透明化。fill_body=True なら中身も埋める。
 
 各パラメータの決まり方 (優先順): 関数引数 > 環境変数 > config.json > 既定値。
-  bg_method   GUEST_FISH_BG_METHOD      bg_method                            "shape"
-  ink_thresh  GUEST_FISH_INK_THRESH     shape_detect.ink_thresh                  28   # shape
-  bg_blur     GUEST_FISH_BG_BLUR        shape_detect.bg_blur                      0   # 0=自動
-  close_px    GUEST_FISH_CLOSE_PX       shape_detect.close_px                    40
-  smooth      GUEST_FISH_SMOOTH         shape_detect.smooth                     0.0   # 0=整えない (シャープ)
+  bg_method     GUEST_FISH_BG_METHOD       bg_method                            "shape"
+  white_balance GUEST_FISH_WHITE_BALANCE   shape_detect.white_balance            True   # shape: 紙で正規化 (flat-field)
+  wb_target     GUEST_FISH_WB_TARGET       shape_detect.wb_target                 245
+  ink_thresh    GUEST_FISH_INK_THRESH      shape_detect.ink_thresh                 28
+  bg_blur       GUEST_FISH_BG_BLUR         shape_detect.bg_blur                     0   # 0=自動
+  close_px      GUEST_FISH_CLOSE_PX        shape_detect.close_px                   40
+  smooth        GUEST_FISH_SMOOTH          shape_detect.smooth                    0.0   # 0=整えない (シャープ)
   v_thresh    GUEST_FISH_V_THRESH       background_removal.value_threshold       200   # hsv
   s_thresh    GUEST_FISH_S_THRESH       background_removal.saturation_threshold   30
   fill_body   GUEST_FISH_FILL_BODY      output.fill_body                       False
@@ -38,8 +40,10 @@ from PIL import Image, ImageDraw, ImageOps
 _DEFAULTS = {
     "bg_method": "shape",   # "shape" = 形ベース (背景差分→輪郭を閉じる→中を満たす→輪郭整える) / "hsv" = 旧 白除去
     # shape 用
+    "white_balance": True,  # 紙の面 (なだらかな照明ムラ/色かぶり/ビネット) で割って正規化 (flat-field)。黒インクが黒に、色が正しく出る
+    "wb_target": 245,       # 正規化後の紙の明るさ。低いほど暗め。255 に近すぎると飛ぶ
     "ink_thresh": 28,       # 紙からの局所残差がこれ以上ならインク。下げると薄いインクも拾う/ノイズも拾う
-    "bg_blur": 0,           # 紙の面を推定するメディアンぼかしの ksize (0 = 画像サイズから自動)
+    "bg_blur": 0,           # 紙の面を推定するメディアンぼかしの ksize (0 = 画像サイズから自動)。WB と ink 検出で共用
     "close_px": 40,         # 輪郭の隙間 (開いた口・ヒレ・ペンの途切れ) を橋渡しする膨張量 px。小さいと中が埋まらない、大きすぎると細部がくっつく
     "smooth": 0.0,          # ベタ面の縁をなめらかにする (approxPolyDP epsilon を周長の何 % か)。0 (既定) = なめらかにしない (手描き線をそのままシャープに切る)。インク自体はこれに関わらず常にシャープ
     # hsv 用 (旧)
@@ -160,11 +164,14 @@ def _parse_margins(value) -> tuple[int, int, int, int] | None:
 
 
 def resolve_params(v_thresh=None, s_thresh=None, long_edge=None, fill_body=None, fill_close=None,
-                   bg_method=None, ink_thresh=None, bg_blur=None, close_px=None, smooth=None) -> dict:
+                   bg_method=None, ink_thresh=None, bg_blur=None, close_px=None, smooth=None,
+                   white_balance=None, wb_target=None) -> dict:
     """remove_white_background / cutout_guest_fish が実際に使うパラメータを 引数 > env > config > 既定 で解決して返す。"""
     return {
         "bg_method": _resolve_str(bg_method, "GUEST_FISH_BG_METHOD", ("bg_method",), _DEFAULTS["bg_method"]),
         # shape
+        "white_balance": _resolve_bool(white_balance, "GUEST_FISH_WHITE_BALANCE", ("shape_detect", "white_balance"), _DEFAULTS["white_balance"]),
+        "wb_target": _resolve_int(wb_target, "GUEST_FISH_WB_TARGET", ("shape_detect", "wb_target"), _DEFAULTS["wb_target"]),
         "ink_thresh": _resolve_int(ink_thresh, "GUEST_FISH_INK_THRESH", ("shape_detect", "ink_thresh"), _DEFAULTS["ink_thresh"]),
         "bg_blur": _resolve_int(bg_blur, "GUEST_FISH_BG_BLUR", ("shape_detect", "bg_blur"), _DEFAULTS["bg_blur"]),
         "close_px": _resolve_int(close_px, "GUEST_FISH_CLOSE_PX", ("shape_detect", "close_px"), _DEFAULTS["close_px"]),
@@ -265,6 +272,19 @@ def _paper_background(rgb: np.ndarray, blur: int) -> np.ndarray:
     return cv2.medianBlur(np.ascontiguousarray(rgb), k)
 
 
+def flat_field(rgb: np.ndarray, *, blur: int = 0, target: int = 245) -> np.ndarray:
+    """紙の面 (なだらかな照明ムラ/色かぶり/ビネット) を _paper_background で推定し、それで割って
+    target に正規化する (flat-field correction = ホワイトバランス兼デビネット)。
+
+    効果: 紙が一様な明るさ target になり、ビネット・ピンク/紫かぶりが消え、黒インクが
+    黒に、色が正しい色に出る。撮影の露出ムラ・ホワイトバランスのズレをまとめて補正。
+    """
+    bg = _paper_background(rgb, blur).astype(np.float32)
+    np.maximum(bg, 1.0, out=bg)
+    out = rgb.astype(np.float32) * (float(target) / bg)
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 def ink_mask(rgb: np.ndarray, *, thresh: int, blur: int = 0) -> np.ndarray:
     """背景差分でインク (色・明るさ問わず) を拾った bool マスク。
 
@@ -348,20 +368,33 @@ def _crop_and_resize_rgba(rgb: np.ndarray, alpha: np.ndarray, long_edge: int) ->
     return out
 
 
+def prepare_rgb(img: Image.Image, *, white_balance=None, wb_target=None, bg_blur=None) -> np.ndarray:
+    """切り抜き前処理: EXIF 補正 + RGB 化 + (white_balance なら) 紙で正規化した RGB 配列を返す。
+
+    tune_guest_fish.py がマスク可視化を本処理と同じ画像で行うために共有する。
+    """
+    p = resolve_params(bg_blur=bg_blur, white_balance=white_balance, wb_target=wb_target, bg_method="shape")
+    rgb = np.array(ImageOps.exif_transpose(img).convert("RGB"))
+    if p["white_balance"]:
+        rgb = flat_field(rgb, blur=p["bg_blur"], target=p["wb_target"])
+    return rgb
+
+
 def cutout_guest_fish(
     img: Image.Image,
     *,
+    white_balance: bool | None = None,
+    wb_target: int | None = None,
     ink_thresh: int | None = None,
     bg_blur: int | None = None,
     close_px: int | None = None,
     smooth: float | None = None,
     long_edge: int | None = None,
 ) -> Image.Image:
-    """形ベースで魚を切り抜いた RGBA を返す。輪郭の内側は撮った写真のまま、外側は透明。"""
-    p = resolve_params(long_edge=long_edge, bg_method="shape", ink_thresh=ink_thresh,
-                       bg_blur=bg_blur, close_px=close_px, smooth=smooth)
-    img = ImageOps.exif_transpose(img).convert("RGB")
-    rgb = np.array(img)
+    """形ベースで魚を切り抜いた RGBA を返す。輪郭の内側は (WB 後の) 写真のまま、外側は透明。"""
+    p = resolve_params(long_edge=long_edge, bg_method="shape", ink_thresh=ink_thresh, bg_blur=bg_blur,
+                       close_px=close_px, smooth=smooth, white_balance=white_balance, wb_target=wb_target)
+    rgb = prepare_rgb(img, white_balance=p["white_balance"], wb_target=p["wb_target"], bg_blur=p["bg_blur"])
     mask = fish_mask(rgb, ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"], close_px=p["close_px"], smooth=p["smooth"])
     alpha = np.where(mask, 255, 0).astype(np.uint8)
     return _crop_and_resize_rgba(rgb, alpha, p["long_edge"])
@@ -474,6 +507,8 @@ def remove_white_background(
     *,
     bg_method: str | None = None,
     # shape 用
+    white_balance: bool | None = None,
+    wb_target: int | None = None,
     ink_thresh: int | None = None,
     bg_blur: int | None = None,
     close_px: int | None = None,
@@ -489,18 +524,19 @@ def remove_white_background(
     """ゲスト魚を切り抜いた RGBA を返す。bg_method ("shape" 既定 / "hsv") で方式を選ぶ。
 
     省略した引数は env / config.json / 既定値の順で解決される (モジュール docstring 参照)。
-    本番 (固定カメラ + 紙だけが映る撮影ブース、適正露出) を前提。
+    本番 (固定カメラ + 紙だけが映る撮影ブース) を前提。
 
-    - "shape": 背景差分でインクを拾い → 輪郭の隙間を close_px で橋渡し → 中を満たし →
-      輪郭を smooth で整える。輪郭の内側は撮った写真のまま、外側は透明。露出や色かぶりに強い。
+    - "shape": (white_balance なら) 紙で正規化 → 背景差分でインクを拾い → 輪郭の隙間を close_px で
+      橋渡し → 中を満たし → ベタ面を smooth で整える + 元インク足し戻し。輪郭の内側は写真のまま、外側は透明。
     - "hsv" (旧): HSV しきい値で「縁から繋がる白」を透明化。fill_body=True なら魚の中身も埋める。
     """
     params = resolve_params(v_thresh, s_thresh, long_edge, fill_body, fill_close,
-                            bg_method, ink_thresh, bg_blur, close_px, smooth)
+                            bg_method, ink_thresh, bg_blur, close_px, smooth, white_balance, wb_target)
     long_edge = params["long_edge"]
 
     if params["bg_method"] == "shape":
-        return cutout_guest_fish(img, ink_thresh=params["ink_thresh"], bg_blur=params["bg_blur"],
+        return cutout_guest_fish(img, white_balance=params["white_balance"], wb_target=params["wb_target"],
+                                 ink_thresh=params["ink_thresh"], bg_blur=params["bg_blur"],
                                  close_px=params["close_px"], smooth=params["smooth"], long_edge=long_edge)
 
     # ── 旧 HSV 方式 ──

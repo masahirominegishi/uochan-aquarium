@@ -5,23 +5,25 @@ realtime_loop.py を立ち上げずに、撮影 → 紙面検出 → 切り抜�
 依存 (numpy / Pillow / scipy / opencv) は fish_ai_realtime の venv 経由で起動:
   ~/Documents/fish_ai_realtime/.venv/bin/python ~/Documents/aquarium/web/tune_guest_fish.py --help
 
-処理は 2 段:
+撮影は --ev -0.7 (やや暗め、白飛び/色飛びを避ける)。処理は 2 段:
   (1) 紙面検出 (detect_paper_bbox): 撮影画像の周囲の暗いブース枠/景色を捨てて
       白い紙の bbox に crop。margins は paper_detect.margins で確定済 ([-73,-80,-32,-80])。
   (2) 切り抜き (remove_white_background, bg_method で 2 方式):
-      "shape" (既定): 背景差分でインク検出 → 輪郭の隙間を close_px で橋渡し → 中を満たす
-        (色は写真のまま) → 輪郭を smooth で整える。適正露出 (--ev 0) 前提、色かぶりに強い。
+      "shape" (既定): 紙で正規化 (white_balance=flat-field: ビネット/色かぶりを消す、黒インクを黒に)
+        → 背景差分でインク検出 → 輪郭の隙間を close_px で橋渡し → 中を満たす (色は正規化後の写真のまま)
+        → ベタ面を smooth で整える + 元インク足し戻し (輪郭線/色/尖りはシャープに残る)。
       "hsv" (旧): HSV しきい値で「縁から繋がる白」を透明化。fill_body=True なら中身も埋める。
 
 典型ワークフロー (shape):
   1. ブースに絵を置いて撮る + 結果を HDMI 確認 (撮影時 LED 自動点灯 → warmup → 撮影 → 消灯):
-       ... --capture --show --show-target result
-     → tune_out/{paper_detect.png, paper_crop.jpg, result.png, result_on_checker.png, mask_overlay.png}
-  2. 輪郭の閉じ具合を比較: ... --sweep-close --show --show-target sweep   (close_px を振る)
-  3. 詳しく見る: ... --close-px 22 --smooth 1.5 --show --show-target mask
-     (mask_overlay = 青:検出インク / 赤:透明化される魚の外 / 境界:最終の輪郭)
-  4. 良い値を反映: env (GUEST_FISH_INK_THRESH / _CLOSE_PX / _SMOOTH / _BG_METHOD ...) か
-     web/config.json の shape_detect.* / bg_method / output.long_edge を編集。
+       ... --capture --show   (--show-target は既定 result)
+     → tune_out/{paper_detect.png, paper_crop.jpg, wb_preview.jpg, result.png, result_on_checker.png, mask_overlay.png}
+  2. 暗すぎ/明るすぎ → --ev を上げ下げ、または --wb-target を上げ下げ。色かぶりが残る → --no-white-balance で素のも確認
+  3. 輪郭の閉じ具合を比較: ... --sweep-close --show --show-target sweep   (close_px を振る)
+  4. 詳しく見る: ... --close-px 30 --ink-thresh 22 --show --show-target mask
+     (mask_overlay = 青:検出インク / 赤:透明化される魚の外 / 境界:最終の輪郭、正規化後の画像で)
+  5. 良い値を反映: env (GUEST_FISH_WHITE_BALANCE / _WB_TARGET / _INK_THRESH / _CLOSE_PX / _SMOOTH / _BG_METHOD ...)
+     か web/config.json の shape_detect.* / bg_method / output.long_edge を編集。
 
 --show は chromium --kiosk で pi-main の HDMI に出す。閉じるのは pkill -f 'chromium.*--kiosk'。
 """
@@ -44,6 +46,7 @@ from guest_fish_pipeline import (  # noqa: E402
     crop_to_paper,
     fish_mask,
     ink_mask,
+    prepare_rgb,
     remove_white_background,
     resolve_paper_params,
     resolve_params,
@@ -187,7 +190,8 @@ def _mask_overlay(src_rgb: np.ndarray, removed: np.ndarray) -> Image.Image:
 
 def _params_brief(p: dict) -> str:
     if p["bg_method"] == "shape":
-        return f"bg_method=shape ink_thresh={p['ink_thresh']} bg_blur={p['bg_blur']} close_px={p['close_px']} smooth={p['smooth']} long_edge={p['long_edge']}"
+        return (f"bg_method=shape white_balance={p['white_balance']} wb_target={p['wb_target']} "
+                f"ink_thresh={p['ink_thresh']} bg_blur={p['bg_blur']} close_px={p['close_px']} smooth={p['smooth']} long_edge={p['long_edge']}")
     return f"bg_method=hsv v_thresh={p['v_thresh']} s_thresh={p['s_thresh']} fill_body={p['fill_body']} fill_close={p['fill_close']} long_edge={p['long_edge']}"
 
 
@@ -202,7 +206,6 @@ def _shape_mask_overlay(src_rgb: np.ndarray, ink: np.ndarray, fm: np.ndarray) ->
 def single(src: Image.Image, out_dir: Path, **kw) -> None:
     p = resolve_params(**kw)
     print(f"==> 使用パラメータ: {_params_brief(p)}")
-    src_rgb = np.array(src.convert("RGB"))
 
     result = remove_white_background(src, **p)
     res_path = out_dir / "result.png"
@@ -211,11 +214,14 @@ def single(src: Image.Image, out_dir: Path, **kw) -> None:
     print(f"==> 結果 {result.size[0]}x{result.size[1]} -> {res_path} (+ result_on_checker.png)")
 
     if p["bg_method"] == "shape":
+        src_rgb = prepare_rgb(src, white_balance=p["white_balance"], wb_target=p["wb_target"], bg_blur=p["bg_blur"])
+        Image.fromarray(src_rgb, "RGB").save(out_dir / "wb_preview.jpg", quality=92)  # 正規化後の見た目
         ink = ink_mask(src_rgb, thresh=p["ink_thresh"], blur=p["bg_blur"])
         fm = fish_mask(src_rgb, ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"], close_px=p["close_px"], smooth=p["smooth"])
         _shape_mask_overlay(src_rgb, ink, fm).save(out_dir / "mask_overlay.png")
-        print(f"==> マスク可視化 (青=検出インク / 赤=透明化(魚の外) / 境界=最終の輪郭) -> {out_dir / 'mask_overlay.png'}")
+        print(f"==> マスク可視化 (青=検出インク / 赤=透明化(魚の外) / 境界=最終の輪郭、正規化後の画像で) -> {out_dir / 'mask_overlay.png'}  (+ wb_preview.jpg)")
     else:
+        src_rgb = np.array(src.convert("RGB"))
         if p["fill_body"]:
             removed = ~compute_silhouette(src_rgb, v_thresh=p["v_thresh"], s_thresh=p["s_thresh"], close_px=p["fill_close"])
             note = f"赤=透明化される範囲 / 緑枠=crop (fill_body, close={p['fill_close']})"
@@ -276,7 +282,8 @@ def sweep_close(src: Image.Image, out_dir: Path, close_list: list[int], **kw) ->
     print(f"==> {'close_px (shape)' if is_shape else 'fill_close (hsv)'} スイープ")
     for ck in close_list:
         if is_shape:
-            res = remove_white_background(src, bg_method="shape", ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"],
+            res = remove_white_background(src, bg_method="shape", white_balance=p["white_balance"], wb_target=p["wb_target"],
+                                          ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"],
                                           close_px=ck, smooth=p["smooth"], long_edge=p["long_edge"])
             label = f"close_px={ck}  {res.size[0]}x{res.size[1]}"
         else:
@@ -338,7 +345,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="ゲスト魚トリミングのチューニング CLI", formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     ap.add_argument("--capture", action="store_true", help="rpicam-still で 1 枚撮って tune_out/latest.jpg に保存してから処理する")
     ap.add_argument("--camera", type=int, default=0, help="撮影に使うカメラ index (既定 0 = IMX219)")
-    ap.add_argument("--ev", type=float, default=0.0, help="撮影時の露出補正 EV (既定 0 = 適正露出。色を飛ばさないため)")
+    ap.add_argument("--ev", type=float, default=-0.7, help="撮影時の露出補正 EV (既定 -0.7 = やや暗め。白飛び/色飛びを避ける)")
     ap.add_argument("--rotation", type=int, default=180, help="撮影時の回転角 (既定 180、本番と同値)")
     ap.add_argument("--rpicam-extra", default="", help="rpicam-still に渡す追加引数 (例: '--awb tungsten --shutter 8000')")
     ap.add_argument("--no-led", action="store_true", help="撮影時にブース LED を点灯しない (既定は点灯する)")
@@ -355,10 +362,14 @@ def main() -> int:
     ap.add_argument("--bg-method", choices=["shape", "hsv"], dest="bg_method", default=None,
                     help="shape=形ベース(背景差分→輪郭を閉じる→中を満たす→輪郭整え) / hsv=旧 白除去。省略時は config/既定(shape)")
     # shape 用
+    ap.add_argument("--white-balance", dest="white_balance", action="store_const", const=True, default=None,
+                    help="紙で正規化 (flat-field: ビネット/色かぶりを消す、黒インクを黒に)。省略時 config/既定(on)")
+    ap.add_argument("--no-white-balance", dest="white_balance", action="store_const", const=False, help="紙の正規化をしない")
+    ap.add_argument("--wb-target", type=int, dest="wb_target", help="正規化後の紙の明るさ (省略時 config/既定 245)。低いほど暗め")
     ap.add_argument("--ink-thresh", type=int, dest="ink_thresh", help="背景差分でインクとみなす残差しきい値 (省略時 config/既定 28)。下げると薄いインクも拾う")
     ap.add_argument("--bg-blur", type=int, dest="bg_blur", help="紙の面を推定するメディアンぼかし ksize (省略時 0=自動)")
-    ap.add_argument("--close-px", type=int, dest="close_px", help="輪郭の隙間を橋渡しする膨張量 px (省略時 config/既定 18)")
-    ap.add_argument("--smooth", type=float, help="輪郭整え: approxPolyDP epsilon を周長の何% にするか (0=整えない、省略時 config/既定 1.0)")
+    ap.add_argument("--close-px", type=int, dest="close_px", help="輪郭の隙間を橋渡しする膨張量 px (省略時 config/既定 40)")
+    ap.add_argument("--smooth", type=float, help="ベタ面の縁を approxPolyDP で整える: epsilon を周長の何% にするか (0=整えない、省略時 config/既定 0)。インクは常にシャープ")
     # hsv 用 (旧)
     ap.add_argument("--v-thresh", type=int, dest="v_thresh", help="[hsv] value 閾値 (省略時 env/config/既定)")
     ap.add_argument("--s-thresh", type=int, dest="s_thresh", help="[hsv] saturation 閾値 (省略時 env/config/既定)")
@@ -376,8 +387,8 @@ def main() -> int:
     ap.add_argument("--close-list", type=_parse_int_list, default=_parse_int_list("8,12,18,25,35,50"), help="--sweep-close のリスト")
     # HDMI 表示
     ap.add_argument("--show", action="store_true", help="処理後に結果を pi-main の HDMI 画面にフルスクリーン表示する")
-    ap.add_argument("--show-target", choices=["detect", "crop", "result", "sweep", "mask"], default="detect",
-                    help="--show で映すもの: detect=紙面検出の確認画像(既定) / crop=切り出した紙面 / result=白除去後 / sweep=モンタージュ / mask=白除去マスク")
+    ap.add_argument("--show-target", choices=["detect", "crop", "result", "sweep", "mask", "wb"], default="result",
+                    help="--show で映すもの: result=切り抜き後(既定) / detect=紙面検出の確認 / crop=切り出した紙面(WB前) / wb=正規化後の見た目 / mask=切り抜きマスクの内訳 / sweep=モンタージュ")
     args = ap.parse_args()
 
     out_dir: Path = args.out_dir
@@ -415,9 +426,10 @@ def main() -> int:
 
     # 2) 切り抜きフェーズ (紙面を切り出した後の画像に対して)
     work = src if (args.no_paper_crop or bbox is None) else crop_img
-    proc_kw = dict(bg_method=args.bg_method, ink_thresh=args.ink_thresh, bg_blur=args.bg_blur,
-                   close_px=args.close_px, smooth=args.smooth, v_thresh=args.v_thresh, s_thresh=args.s_thresh,
-                   fill_body=args.fill_body, fill_close=args.fill_close, long_edge=args.long_edge)
+    proc_kw = dict(bg_method=args.bg_method, white_balance=args.white_balance, wb_target=args.wb_target,
+                   ink_thresh=args.ink_thresh, bg_blur=args.bg_blur, close_px=args.close_px, smooth=args.smooth,
+                   v_thresh=args.v_thresh, s_thresh=args.s_thresh, fill_body=args.fill_body, fill_close=args.fill_close,
+                   long_edge=args.long_edge)
     if args.sweep_close:
         sweep_close(work, out_dir, args.close_list, **proc_kw)
     elif args.sweep:
@@ -433,6 +445,7 @@ def main() -> int:
             "result": out_dir / "result_on_checker.png",
             "sweep": out_dir / "sweep.png",
             "mask": out_dir / "mask_overlay.png",
+            "wb": out_dir / "wb_preview.jpg",
         }[args.show_target]
         if target.exists():
             _show_on_hdmi(target)
