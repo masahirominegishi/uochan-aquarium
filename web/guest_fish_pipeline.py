@@ -53,7 +53,7 @@ _DEFAULTS = {
     "levels_gamma": 1.0,    # 中間調 (1.0=変えない、<1 で暗く、>1 で明るく)
     "ink_thresh": 28,       # 紙からの局所残差がこれ以上ならインク。下げると薄いインクも拾う/ノイズも拾う
     "bg_blur": 0,           # 紙の面を推定するメディアンぼかしの ksize (0 = 画像サイズから自動)。WB と ink 検出で共用
-    "close_px": 40,         # 輪郭の隙間 (開いた口・ヒレ・ペンの途切れ) を橋渡しする膨張量 px。小さいと中が埋まらない、大きすぎると細部がくっつく
+    "close_px": 40,         # 輪郭の隙間を閉じる強さ。端点ペアを直線で繋ぐ最大距離 = 2*close_px px。小さいと大きく開いた口が閉じず中空に、大きすぎると離れた線同士を繋いでしまう
     "smooth": 0.0,          # ベタ面の縁をなめらかにする (approxPolyDP epsilon を周長の何 % か)。0 (既定) = なめらかにしない (手描き線をそのままシャープに切る)。インク自体はこれに関わらず常にシャープ
     # hsv 用 (旧)
     "v_thresh": 200, "s_thresh": 30, "fill_body": False, "fill_close": 25,
@@ -337,6 +337,52 @@ def ink_mask(rgb: np.ndarray, *, thresh: int, blur: int = 0) -> np.ndarray:
     return resid >= int(thresh)
 
 
+def _bridge_endpoint_gaps(ink: np.ndarray, max_gap: int) -> np.ndarray:
+    """ink (bool マスク) を骨格化して線の端点 (行き止まり) を求め、max_gap px 以内の端点ペアを
+    直線で繋いで輪郭の隙間 (開いた口・ヒレの切れ目・ペンの途切れ) を閉じる。
+
+    モルフォロジーの太い円弧と違い直線で繋ぐので、輪郭線の外に白が膨らまない。元の ink に
+    直線を足した bool マスクを返す。max_gap <= 0 や端点が無ければ ink をそのまま返す。
+    """
+    if max_gap is None or max_gap <= 0:
+        return ink
+    import cv2
+    from scipy import ndimage
+    src = np.ascontiguousarray((ink.astype(np.uint8)) * 255)
+    try:
+        sk = cv2.ximgproc.thinning(src)  # 1px 骨格 (0/255)
+    except Exception:
+        return ink
+    skb = sk > 0
+    if not skb.any():
+        return ink
+    # 端点 = 自身を除く 8 近傍に骨格画素がちょうど 1 個
+    nbr = ndimage.convolve(skb.astype(np.int16), np.ones((3, 3), np.int16), mode="constant") - skb.astype(np.int16)
+    eps = np.argwhere(skb & (nbr == 1))  # (y, x)
+    if len(eps) < 2:
+        return ink
+    if len(eps) > 240:  # ノイズで端点が多すぎる場合の保険
+        eps = eps[:240]
+    out = (ink.astype(np.uint8)).copy()
+    n = len(eps)
+    g2 = int(max_gap) * int(max_gap)
+    cand = []
+    for i in range(n):
+        yi, xi = int(eps[i][0]), int(eps[i][1])
+        for j in range(i + 1, n):
+            d2 = (yi - int(eps[j][0])) ** 2 + (xi - int(eps[j][1])) ** 2
+            if 0 < d2 <= g2:
+                cand.append((d2, i, j))
+    cand.sort()
+    used = np.zeros(n, bool)
+    for _d2, i, j in cand:
+        if used[i] or used[j]:
+            continue
+        used[i] = used[j] = True
+        cv2.line(out, (int(eps[i][1]), int(eps[i][0])), (int(eps[j][1]), int(eps[j][0])), 1, thickness=3)
+    return out.astype(bool)
+
+
 def _smooth_mask(mask: np.ndarray, eps_pct: float) -> np.ndarray:
     """mask の最大外周コンターを approxPolyDP + Chaikin で整え、塗り直したマスクを返す。
 
@@ -366,26 +412,27 @@ def _smooth_mask(mask: np.ndarray, eps_pct: float) -> np.ndarray:
     return out.astype(bool)
 
 
-def fish_mask(rgb: np.ndarray, *, ink_thresh: int, bg_blur: int = 0, close_px: int = 40, smooth: float = 1.5) -> np.ndarray:
+def fish_mask(rgb: np.ndarray, *, ink_thresh: int, bg_blur: int = 0, close_px: int = 40, smooth: float = 0.0) -> np.ndarray:
     """魚の形 (中身まで満たした) の bool マスクを返す。alpha に使う。色 (RGB) は呼び出し側で元のまま。
 
-    インク検出 → close_px だけ膨張で輪郭の隙間 (開いた口・ヒレ・ペンの途切れ) を橋渡し
-    → 最大連結成分 → 穴埋め → 同じだけ収縮 = ベタ面の領域 (body)。smooth>0 ならこの body を
-    なめらかな多角形に簡略化する (輪郭線が無い所 = 隙間の橋渡しや細部の縁が曲線になる)。
-    最後に元のインクを足し戻す (= 輪郭線・色・尖った先端は smooth に関わらず常に残り、シャープ)。
-    → 結果: インクが描かれている所はその線にシャープに沿い、隙間や塗り残しの縁はなめらか。
+    手順: インク検出 → 骨格化して線の端点を求め、~2*close_px px 以内の端点ペアを「直線」で繋いで
+    輪郭の隙間 (開いた口・ヒレの切れ目・ペンの途切れ) を閉じる (太い円弧で埋めないので輪郭線の外に
+    白が膨らまない) → 残った微小な隙間だけ小さな close で埋める → 最大連結成分 → 穴埋め (= ベタ面) →
+    smooth>0 なら輪郭をなめらかに簡略化 → 元のインクを足し戻す (輪郭線・色・尖った先端を必ず残す)。
+    → 結果: 切り口が手描きの輪郭線にぴったり沿い、線の外に白が出ない。閉じた口の絵もちゃんと埋まる。
     """
     from scipy import ndimage
     ink = ink_mask(rgb, thresh=ink_thresh, blur=bg_blur)
     k = max(0, int(close_px))
     if k > 0:
-        grown = _largest_component(ndimage.binary_dilation(ink, iterations=k))
-        body = ndimage.binary_erosion(ndimage.binary_fill_holes(grown), iterations=k, border_value=1)
+        bridged = _bridge_endpoint_gaps(ink, max_gap=2 * k)            # 隙間を直線で閉じる (太らせない)
+        sealed = ndimage.binary_closing(bridged, structure=np.ones((3, 3)), iterations=2)  # 残った ~2px の隙間だけ
+        body = ndimage.binary_fill_holes(_largest_component(sealed))   # 閉じた輪郭の中を満たす
     else:
         body = ndimage.binary_fill_holes(_largest_component(ink))
     if smooth and smooth > 0:
         body = _smooth_mask(body, smooth)
-    return _largest_component(body | ink)   # ベタ面 (なめらか) + 元のインク全部 (シャープ)、魚に繋がる分だけ
+    return _largest_component(body | ink)   # ベタ面 + 元のインク全部、魚に繋がる分だけ
 
 
 def _crop_and_resize_rgba(rgb: np.ndarray, alpha: np.ndarray, long_edge: int) -> Image.Image:
