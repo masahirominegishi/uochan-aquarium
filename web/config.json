@@ -9,10 +9,16 @@
   "guest_fish_path": "../guest_fish.json",
   "pending_owner_link_path": "/home/mine/Documents/fish_ai_realtime/pending_owner_link.json",
   "_pending_owner_link_comment": "Phase 1.5 (飼い主登録) で realtime_loop が読むトリガーファイル。upload_server から書く。Phase 2/3 では廃止予定",
+  "paper_detect": {
+    "value_threshold": 150,
+    "saturation_threshold": 80,
+    "margins": [-80, -80, -25, -80],
+    "_comment": "撮影画像から白い紙のシートだけを切り出す。明るくて (V>=value_threshold) 彩度の低い (S<=saturation_threshold) 領域以外で、画像の縁から連結しているもの (暗いブース枠/影/外の景色) を flood fill で除外し、残った最大領域を紙面とする。margins=[left,top,right,bottom] は紙面 bbox を各辺に広げる px (負で内側に縮める)。負値はレンズ歪みで四隅に出るボックスのフチを切り落とす用。2026-05-10 にこのカメラ位置・ボックスで [-80,-80,-25,-80] に確定。配置が変わったら tune_guest_fish.py で取り直し。0 / [0,0,0,0] で無効化"
+  },
   "background_removal": {
     "value_threshold": 200,
     "saturation_threshold": 30,
-    "_comment": "HSV で V >= value_threshold かつ S <= saturation_threshold のピクセルを「白っぽい候補」とみなし、画像の縁から flood fill で繋がる部分のみを背景として透明化する。本番想定 (固定カメラ + 紙だけ撮影) で動くシンプル処理。魚の中の白 (目玉等) は縁から繋がらないので残る"
+    "_comment": "紙面を切り出した後の画像に対して、HSV で V >= value_threshold かつ S <= saturation_threshold のピクセルを「白っぽい候補」とみなし、画像の縁から flood fill で繋がる部分のみを背景として透明化する。魚の中の白 (目玉等) は縁から繋がらないので残る"
   },
   "output": {
     "long_edge": 600
