@@ -43,6 +43,7 @@
     "bg_blur": 0,
     "close_px": 40,
     "smooth": 0.0,
+    "trim_halo": true,
     "_comment": "shape 方式のパラメータ。色補正: autocontrast=true で PIL.ImageOps.autocontrast 相当 (各チャンネルのヒストグラムを [0,255] に伸長 = オートホワイトバランス+オートレベル、紙が白に・インクが黒に・色かぶり消える)、autocontrast_cutoff = 上下それぞれ何% の外れ値を無視するか (大きいほど強く飛ばす)。white_balance=true で紙の面で割る flat-field 正規化 (ビネット=周辺の暗がりも消える。autocontrast と併用可)、wb_target = flat-field 後の紙の明るさ。levels_black/white/gamma = Photoshop のレベル補正相当 (入力 [black,white] を [0,255] に伸長 + gamma。0/255/1.0 = しない)。検出: ink_thresh = 紙からの局所残差がこれ以上ならインク。bg_blur = 紙の面のメディアンぼかし ksize (0=自動)。close_px = 輪郭の隙間を橋渡しする膨張量 px。元インク (輪郭線/色/尖り) は close_px/smooth に関わらず必ず足し戻す。smooth = ベタ面の縁を approxPolyDP で整える epsilon を周長の何% (0=シャープ)。撮影 EV は -0.8。2026-05-10 にこのカメラ/絵で要調整。"
   },
   "background_removal": {

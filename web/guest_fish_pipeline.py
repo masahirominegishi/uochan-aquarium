@@ -55,6 +55,7 @@ _DEFAULTS = {
     "bg_blur": 0,           # 紙の面を推定するメディアンぼかしの ksize (0 = 画像サイズから自動)。WB と ink 検出で共用
     "close_px": 40,         # 輪郭の隙間を閉じる強さ。端点ペアを直線で繋ぐ最大距離 = 2*close_px px。小さいと大きく開いた口が閉じず中空に、大きすぎると離れた線同士を繋いでしまう
     "smooth": 0.0,          # ベタ面の縁をなめらかにする (approxPolyDP epsilon を周長の何 % か)。0 (既定) = なめらかにしない (手描き線をそのままシャープに切る)。インク自体はこれに関わらず常にシャープ
+    "trim_halo": True,      # 仕上げ: 透明に隣接する白 (輪郭線の外に膨らんだ白) を、インク/橋渡し線にぶつかるまで削る。橋渡し線は削らない。体内部まで漏れる場合はスキップ
     # hsv 用 (旧)
     "v_thresh": 200, "s_thresh": 30, "fill_body": False, "fill_close": 25,
     # 共通
@@ -173,7 +174,7 @@ def _parse_margins(value) -> tuple[int, int, int, int] | None:
 
 
 def resolve_params(v_thresh=None, s_thresh=None, long_edge=None, fill_body=None, fill_close=None,
-                   bg_method=None, ink_thresh=None, bg_blur=None, close_px=None, smooth=None,
+                   bg_method=None, ink_thresh=None, bg_blur=None, close_px=None, smooth=None, trim_halo=None,
                    white_balance=None, wb_target=None, levels_black=None, levels_white=None, levels_gamma=None,
                    autocontrast=None, autocontrast_cutoff=None) -> dict:
     """remove_white_background / cutout_guest_fish が実際に使うパラメータを 引数 > env > config > 既定 で解決して返す。"""
@@ -191,6 +192,7 @@ def resolve_params(v_thresh=None, s_thresh=None, long_edge=None, fill_body=None,
         "bg_blur": _resolve_int(bg_blur, "GUEST_FISH_BG_BLUR", ("shape_detect", "bg_blur"), _DEFAULTS["bg_blur"]),
         "close_px": _resolve_int(close_px, "GUEST_FISH_CLOSE_PX", ("shape_detect", "close_px"), _DEFAULTS["close_px"]),
         "smooth": _resolve_float(smooth, "GUEST_FISH_SMOOTH", ("shape_detect", "smooth"), _DEFAULTS["smooth"]),
+        "trim_halo": _resolve_bool(trim_halo, "GUEST_FISH_TRIM_HALO", ("shape_detect", "trim_halo"), _DEFAULTS["trim_halo"]),
         # hsv (旧)
         "v_thresh": _resolve_int(v_thresh, "GUEST_FISH_V_THRESH", ("background_removal", "value_threshold"), _DEFAULTS["v_thresh"]),
         "s_thresh": _resolve_int(s_thresh, "GUEST_FISH_S_THRESH", ("background_removal", "saturation_threshold"), _DEFAULTS["s_thresh"]),
@@ -249,6 +251,18 @@ def _largest_component(mask: np.ndarray) -> np.ndarray:
         return mask
     sizes = ndimage.sum(np.ones_like(labels), labels, index=range(1, n + 1))
     return labels == (int(np.argmax(sizes)) + 1)
+
+
+def _border_connected(mask: np.ndarray) -> np.ndarray:
+    """bool マスクのうち、画像の縁に接している連結成分だけ True にして返す。"""
+    from scipy import ndimage
+    labels, n = ndimage.label(mask)
+    if n == 0:
+        return np.zeros_like(mask, dtype=bool)
+    edge = np.concatenate([labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]])
+    keep = set(int(v) for v in np.unique(edge))
+    keep.discard(0)
+    return np.isin(labels, list(keep)) if keep else np.zeros_like(mask, dtype=bool)
 
 
 def _keep_main_blob(mask: np.ndarray, near_px: int) -> np.ndarray:
@@ -453,14 +467,17 @@ def _smooth_mask(mask: np.ndarray, eps_pct: float) -> np.ndarray:
     return out.astype(bool)
 
 
-def fish_mask(rgb: np.ndarray, *, ink_thresh: int, bg_blur: int = 0, close_px: int = 40, smooth: float = 0.0) -> np.ndarray:
+def fish_mask(rgb: np.ndarray, *, ink_thresh: int, bg_blur: int = 0, close_px: int = 40,
+              smooth: float = 0.0, trim_halo: bool = True) -> np.ndarray:
     """魚の形 (中身まで満たした) の bool マスクを返す。alpha に使う。色 (RGB) は呼び出し側で元のまま。
 
-    手順: インク検出 → 骨格化して線の端点を求め、~2*close_px px 以内の端点ペアを「直線」で繋いで
-    輪郭の隙間 (開いた口・ヒレの切れ目・ペンの途切れ) を閉じる (太い円弧で埋めないので輪郭線の外に
-    白が膨らまない) → 残った微小な隙間だけ小さな close で埋める → 最大連結成分 → 穴埋め (= ベタ面) →
-    smooth>0 なら輪郭をなめらかに簡略化 → 元のインクを足し戻す (輪郭線・色・尖った先端を必ず残す)。
-    → 結果: 切り口が手描きの輪郭線にぴったり沿い、線の外に白が出ない。閉じた口の絵もちゃんと埋まる。
+    段階1: インク検出 → 骨格化して線の端点を求め、~2*close_px px 以内の端点ペアを「直線」で繋いで
+      輪郭の隙間 (開いた口・ヒレの切れ目・ペンの途切れ) を閉じる → 残った微小な隙間だけ小さな close →
+      最大連結成分 → 穴埋め (= ベタ面)。直線で閉じ切らず中空ならモルフォロジー (太い円弧) でフォールバック。
+      → 元のインクを足し戻す + 体に近い独立成分 (体の外に描いた腹びれ等) も残す。
+    段階2 (trim_halo): 透明に隣接する「白」(= インクでも橋渡し線でもない部分) を、インクや橋渡し線に
+      ぶつかるまで削る (= 輪郭線の外に膨らんだ白を仕上げで取り除く)。橋渡し線にはぶつかって止まるので
+      「線が繋がってなくて繋いだ所」は削らない。体内部まで漏れる (= 隙間が塞がってなかった) 場合はスキップ。
     """
     from scipy import ndimage
     ink = ink_mask(rgb, thresh=ink_thresh, blur=bg_blur)
@@ -471,15 +488,24 @@ def fish_mask(rgb: np.ndarray, *, ink_thresh: int, bg_blur: int = 0, close_px: i
         lc = _largest_component(sealed)
         body = ndimage.binary_fill_holes(lc)                           # 閉じた輪郭の中を満たす
         if body.sum() < 2.2 * int(lc.sum()):
-            # 直線つなぎで輪郭が閉じ切らず中空 → モルフォロジー (太い円弧) でフォールバック (= 体は埋まるが線の外に膨らむ)
+            # 直線つなぎで輪郭が閉じ切らず中空 → モルフォロジー (太い円弧) でフォールバック
             grown = _largest_component(ndimage.binary_dilation(bridged, iterations=k))
             body = ndimage.binary_erosion(ndimage.binary_fill_holes(grown), iterations=k, border_value=1)
     else:
+        bridged = ink
         body = ndimage.binary_fill_holes(_largest_component(ink))
     if smooth and smooth > 0:
         body = _smooth_mask(body, smooth)
-    # ベタ面 + 元のインク全部。体に「近い」独立成分 (体の外に描いた腹びれ等) も残す (= _keep_main_blob)
-    return _keep_main_blob(body | ink, near_px=max(8, int(close_px)))
+    mask = _keep_main_blob(body | ink, near_px=max(8, k))
+
+    if trim_halo:
+        barrier = ndimage.binary_dilation(bridged, iterations=1)       # インク + 橋渡し線 (+1px の余裕)
+        passable = mask & ~barrier                                     # 削れる候補 (白の太り部分 + 体内部)
+        reach = _border_connected((~mask) | passable)                  # 画像の縁 (透明) から passable を通って届く所
+        removable = reach & mask & passable                            # 透明に隣接する白
+        if 0 < removable.sum() < 0.5 * mask.sum():                     # 体内部まで漏れてない場合だけ適用
+            mask = _keep_main_blob((mask & ~removable) | (ink & mask), near_px=max(8, k))
+    return mask
 
 
 def _crop_and_resize_rgba(rgb: np.ndarray, alpha: np.ndarray, long_edge: int) -> Image.Image:
@@ -525,7 +551,7 @@ def cutout_guest_fish(img: Image.Image, **kw) -> Image.Image:
     rgb = prepare_rgb(img, white_balance=p["white_balance"], wb_target=p["wb_target"], bg_blur=p["bg_blur"],
                       levels_black=p["levels_black"], levels_white=p["levels_white"], levels_gamma=p["levels_gamma"],
                       autocontrast=p["autocontrast"], autocontrast_cutoff=p["autocontrast_cutoff"])
-    mask = fish_mask(rgb, ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"], close_px=p["close_px"], smooth=p["smooth"])
+    mask = fish_mask(rgb, ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"], close_px=p["close_px"], smooth=p["smooth"], trim_halo=p["trim_halo"])
     alpha = np.where(mask, 255, 0).astype(np.uint8)
     return _crop_and_resize_rgba(rgb, alpha, p["long_edge"])
 
@@ -649,7 +675,7 @@ def remove_white_background(img: Image.Image, **kw) -> Image.Image:
     if params["bg_method"] == "shape":
         return cutout_guest_fish(img, **{k: params[k] for k in (
             "white_balance", "wb_target", "levels_black", "levels_white", "levels_gamma",
-            "autocontrast", "autocontrast_cutoff", "ink_thresh", "bg_blur", "close_px", "smooth", "long_edge")})
+            "autocontrast", "autocontrast_cutoff", "ink_thresh", "bg_blur", "close_px", "smooth", "trim_halo", "long_edge")})
 
     # ── 旧 HSV 方式 ──
     v_thresh, s_thresh = params["v_thresh"], params["s_thresh"]

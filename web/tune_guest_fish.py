@@ -236,7 +236,7 @@ def _params_brief(p: dict) -> str:
         return (f"bg_method=shape autocontrast={p['autocontrast']}(cutoff={p['autocontrast_cutoff']}) "
                 f"white_balance={p['white_balance']} wb_target={p['wb_target']} "
                 f"levels(black={p['levels_black']} white={p['levels_white']} gamma={p['levels_gamma']}) "
-                f"ink_thresh={p['ink_thresh']} bg_blur={p['bg_blur']} close_px={p['close_px']} smooth={p['smooth']} long_edge={p['long_edge']}")
+                f"ink_thresh={p['ink_thresh']} bg_blur={p['bg_blur']} close_px={p['close_px']} smooth={p['smooth']} trim_halo={p['trim_halo']} long_edge={p['long_edge']}")
     return f"bg_method=hsv v_thresh={p['v_thresh']} s_thresh={p['s_thresh']} fill_body={p['fill_body']} fill_close={p['fill_close']} long_edge={p['long_edge']}"
 
 
@@ -264,7 +264,7 @@ def single(src: Image.Image, out_dir: Path, **kw) -> None:
                               autocontrast=p["autocontrast"], autocontrast_cutoff=p["autocontrast_cutoff"])
         Image.fromarray(src_rgb, "RGB").save(out_dir / "wb_preview.jpg", quality=92)  # 色補正後の見た目
         ink = ink_mask(src_rgb, thresh=p["ink_thresh"], blur=p["bg_blur"])
-        fm = fish_mask(src_rgb, ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"], close_px=p["close_px"], smooth=p["smooth"])
+        fm = fish_mask(src_rgb, ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"], close_px=p["close_px"], smooth=p["smooth"], trim_halo=p["trim_halo"])
         _shape_mask_overlay(src_rgb, ink, fm).save(out_dir / "mask_overlay.png")
         print(f"==> マスク可視化 (青=検出インク / 赤=透明化(魚の外) / 境界=最終の輪郭、正規化後の画像で) -> {out_dir / 'mask_overlay.png'}  (+ wb_preview.jpg)")
     else:
@@ -346,7 +346,7 @@ def _shape_kw(p: dict, **over) -> dict:
     """shape の remove_white_background 用 kw を p から組み立て、over で上書き。"""
     base = {k: p[k] for k in ("autocontrast", "autocontrast_cutoff", "white_balance", "wb_target",
                               "levels_black", "levels_white", "levels_gamma", "ink_thresh", "bg_blur",
-                              "close_px", "smooth", "long_edge")}
+                              "close_px", "smooth", "trim_halo", "long_edge")}
     base["bg_method"] = "shape"
     base.update(over)
     return base
@@ -486,6 +486,9 @@ def main() -> int:
     ap.add_argument("--bg-blur", type=int, dest="bg_blur", help="紙の面を推定するメディアンぼかし ksize (省略時 0=自動)")
     ap.add_argument("--close-px", type=int, dest="close_px", help="輪郭の隙間を橋渡しする膨張量 px (省略時 config/既定 40)")
     ap.add_argument("--smooth", type=float, help="ベタ面の縁を approxPolyDP で整える: epsilon を周長の何% にするか (0=整えない、省略時 config/既定 0)。インクは常にシャープ")
+    ap.add_argument("--trim-halo", dest="trim_halo", action="store_const", const=True, default=None,
+                    help="仕上げで透明に隣接する白 (輪郭線の外に膨らんだ白) をインク/橋渡し線まで削る。省略時 config/既定(on)")
+    ap.add_argument("--no-trim-halo", dest="trim_halo", action="store_const", const=False, help="仕上げの白削りをしない (段階1のまま)")
     # hsv 用 (旧)
     ap.add_argument("--v-thresh", type=int, dest="v_thresh", help="[hsv] value 閾値 (省略時 env/config/既定)")
     ap.add_argument("--s-thresh", type=int, dest="s_thresh", help="[hsv] saturation 閾値 (省略時 env/config/既定)")
@@ -566,7 +569,7 @@ def main() -> int:
     proc_kw = dict(bg_method=args.bg_method, autocontrast=args.autocontrast, autocontrast_cutoff=args.autocontrast_cutoff,
                    white_balance=args.white_balance, wb_target=args.wb_target,
                    levels_black=args.levels_black, levels_white=args.levels_white, levels_gamma=args.levels_gamma,
-                   ink_thresh=args.ink_thresh, bg_blur=args.bg_blur, close_px=args.close_px, smooth=args.smooth,
+                   ink_thresh=args.ink_thresh, bg_blur=args.bg_blur, close_px=args.close_px, smooth=args.smooth, trim_halo=args.trim_halo,
                    v_thresh=args.v_thresh, s_thresh=args.s_thresh, fill_body=args.fill_body, fill_close=args.fill_close,
                    long_edge=args.long_edge)
     if args.sweep_cutoff:
