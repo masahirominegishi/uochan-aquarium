@@ -278,10 +278,18 @@ def compute_silhouette(rgb: np.ndarray, *, v_thresh: int, s_thresh: int, close_p
 # 捉えて切り抜く。1) 背景差分でインクを拾う → 2) 隙間を膨張で橋渡しして輪郭を閉じる
 # → 3) 中を alpha で満たす (色は元のまま) → 4) 輪郭をなめらかに整える。
 def _paper_background(rgb: np.ndarray, blur: int) -> np.ndarray:
-    """紙の面 (ビネット・色かぶり込みの、なだらかに変化する成分) をメディアンぼかしで推定。"""
+    """紙の面 (ビネット・色かぶり込みの、なだらかに変化する成分) をメディアンぼかしで推定。
+
+    blur=0 で自動。窓は大きめにする (= 線画が集まった所 (目の輪郭等) で推定が暗側に
+    引っ張られて、その内側の白だけ過剰に明るくなる artifact を避ける)。
+    """
     import cv2
     h, w = rgb.shape[:2]
-    k = int(blur) if blur and blur > 0 else max(9, int(round(max(h, w) * 0.027)))
+    if blur and blur > 0:
+        k = int(blur)
+    else:
+        k = max(31, int(round(max(h, w) * 0.07)))   # ~画像長辺の 7%
+        k = min(k, 151)
     if k % 2 == 0:
         k += 1
     return cv2.medianBlur(np.ascontiguousarray(rgb), k)
