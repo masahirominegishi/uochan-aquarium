@@ -338,11 +338,12 @@ def ink_mask(rgb: np.ndarray, *, thresh: int, blur: int = 0) -> np.ndarray:
 
 
 def _bridge_endpoint_gaps(ink: np.ndarray, max_gap: int) -> np.ndarray:
-    """ink (bool マスク) を骨格化して線の端点 (行き止まり) を求め、max_gap px 以内の端点ペアを
-    直線で繋いで輪郭の隙間 (開いた口・ヒレの切れ目・ペンの途切れ) を閉じる。
+    """ink (bool マスク) を骨格化して線の端点 (行き止まり) を求め、向き合っていて max_gap px 以内の
+    端点ペアを「直線」で繋いで輪郭の隙間 (開いた口・ヒレの切れ目・ペンの途切れ) を閉じる。
 
-    モルフォロジーの太い円弧と違い直線で繋ぐので、輪郭線の外に白が膨らまない。元の ink に
-    直線を足した bool マスクを返す。max_gap <= 0 や端点が無ければ ink をそのまま返す。
+    モルフォロジーの太い円弧と違い直線なので、輪郭線の外に白が膨らまない。各端点の「線が伸びる
+    方向」を求め、相手がその先にいるペアだけ繋ぐ (内側の模様の線端を輪郭に繋いだりしない)。
+    元の ink に直線を足した bool マスクを返す。
     """
     if max_gap is None or max_gap <= 0:
         return ink
@@ -356,22 +357,39 @@ def _bridge_endpoint_gaps(ink: np.ndarray, max_gap: int) -> np.ndarray:
     skb = sk > 0
     if not skb.any():
         return ink
-    # 端点 = 自身を除く 8 近傍に骨格画素がちょうど 1 個
     nbr = ndimage.convolve(skb.astype(np.int16), np.ones((3, 3), np.int16), mode="constant") - skb.astype(np.int16)
-    eps = np.argwhere(skb & (nbr == 1))  # (y, x)
+    eps = np.argwhere(skb & (nbr == 1)).astype(int)  # (y, x)
     if len(eps) < 2:
         return ink
-    if len(eps) > 240:  # ノイズで端点が多すぎる場合の保険
+    if len(eps) > 240:
         eps = eps[:240]
+    H, W = skb.shape
+    win = 8
+    dirs = np.zeros((len(eps), 2), float)  # 各端点の forward 方向 (線が伸びていく向き)
+    for idx, (y, x) in enumerate(eps):
+        y0, y1, x0, x1 = max(0, y - win), min(H, y + win + 1), max(0, x - win), min(W, x + win + 1)
+        ys, xs = np.where(skb[y0:y1, x0:x1])
+        if len(ys) == 0:
+            continue
+        cy, cx = ys.mean() + y0, xs.mean() + x0   # 窓内の骨格の重心
+        v = np.array([y - cy, x - cx], float)      # 重心 → 端点 = forward
+        nrm = float(np.hypot(*v))
+        if nrm > 1e-3:
+            dirs[idx] = v / nrm
     out = (ink.astype(np.uint8)).copy()
     n = len(eps)
     g2 = int(max_gap) * int(max_gap)
     cand = []
     for i in range(n):
-        yi, xi = int(eps[i][0]), int(eps[i][1])
         for j in range(i + 1, n):
-            d2 = (yi - int(eps[j][0])) ** 2 + (xi - int(eps[j][1])) ** 2
-            if 0 < d2 <= g2:
+            dy = float(eps[i][0] - eps[j][0])
+            dx = float(eps[i][1] - eps[j][1])
+            d2 = dy * dy + dx * dx
+            if d2 == 0 or d2 > g2:
+                continue
+            d = d2 ** 0.5
+            vij = np.array([-dy, -dx], float) / d   # i → j
+            if float(dirs[i] @ vij) > 0.05 and float(dirs[j] @ (-vij)) > 0.05:
                 cand.append((d2, i, j))
     cand.sort()
     used = np.zeros(n, bool)
@@ -427,7 +445,12 @@ def fish_mask(rgb: np.ndarray, *, ink_thresh: int, bg_blur: int = 0, close_px: i
     if k > 0:
         bridged = _bridge_endpoint_gaps(ink, max_gap=2 * k)            # 隙間を直線で閉じる (太らせない)
         sealed = ndimage.binary_closing(bridged, structure=np.ones((3, 3)), iterations=2)  # 残った ~2px の隙間だけ
-        body = ndimage.binary_fill_holes(_largest_component(sealed))   # 閉じた輪郭の中を満たす
+        lc = _largest_component(sealed)
+        body = ndimage.binary_fill_holes(lc)                           # 閉じた輪郭の中を満たす
+        if body.sum() < 2.2 * int(lc.sum()):
+            # 直線つなぎで輪郭が閉じ切らず中空 → モルフォロジー (太い円弧) でフォールバック (= 体は埋まるが線の外に膨らむ)
+            grown = _largest_component(ndimage.binary_dilation(bridged, iterations=k))
+            body = ndimage.binary_erosion(ndimage.binary_fill_holes(grown), iterations=k, border_value=1)
     else:
         body = ndimage.binary_fill_holes(_largest_component(ink))
     if smooth and smooth > 0:
