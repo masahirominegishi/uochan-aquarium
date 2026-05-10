@@ -398,8 +398,8 @@ def _bridge_endpoint_gaps(ink: np.ndarray, max_gap: int) -> np.ndarray:
     eps = np.argwhere(skb & (nbr == 1)).astype(int)  # (y, x)
     if len(eps) < 2:
         return ink
-    if len(eps) > 240:
-        eps = eps[:240]
+    if len(eps) > 3000:   # 異常に多い場合だけ保険で打ち切り (普通の絵なら数十〜数百)
+        eps = eps[:3000]
     H, W = skb.shape
     win = 8
     dirs = np.zeros((len(eps), 2), float)  # 各端点の forward 方向 (線が伸びていく向き)
@@ -426,7 +426,7 @@ def _bridge_endpoint_gaps(ink: np.ndarray, max_gap: int) -> np.ndarray:
                 continue
             d = d2 ** 0.5
             vij = np.array([-dy, -dx], float) / d   # i → j
-            if float(dirs[i] @ vij) > 0.05 and float(dirs[j] @ (-vij)) > 0.05:
+            if float(dirs[i] @ vij) > -0.2 and float(dirs[j] @ (-vij)) > -0.2:  # 相手がだいたい線の先の方 (角の隙間も許容)
                 cand.append((d2, i, j))
     cand.sort()
     used = np.zeros(n, bool)
@@ -484,7 +484,7 @@ def fish_mask(rgb: np.ndarray, *, ink_thresh: int, bg_blur: int = 0, close_px: i
     k = max(0, int(close_px))
     if k > 0:
         bridged = _bridge_endpoint_gaps(ink, max_gap=2 * k)            # 隙間を直線で閉じる (太らせない)
-        cseal = max(2, min(int(k) // 3, 14))                           # 直線で繋ぎ切れなかった小さな隙間 (ヒレ等) を埋める用の close
+        cseal = max(2, min(int(k) // 8, 6))                            # 直線で繋ぎ切れなかった極小の隙間用の close (太りは段階2で削る)
         sealed = ndimage.binary_closing(bridged, structure=np.ones((3, 3)), iterations=cseal)
         lc = _largest_component(sealed)
         if ndimage.binary_fill_holes(lc).sum() >= 2.2 * int(lc.sum()):
