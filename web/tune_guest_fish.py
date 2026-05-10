@@ -70,6 +70,10 @@ def _parse_int_list(s: str) -> list[int]:
     return [int(x) for x in s.replace(" ", "").split(",") if x != ""]
 
 
+def _parse_float_list(s: str) -> list[float]:
+    return [float(x) for x in s.replace(" ", "").split(",") if x != ""]
+
+
 def _set_led(on: bool) -> bool:
     """ブース LED を pinctrl で ON/OFF する。成功したら True。
 
@@ -93,46 +97,75 @@ def _realtime_loop_running() -> bool:
         return False
 
 
+def _rpicam_shot(dst: Path, *, camera: int, ev: float, rotation: int, extra: str) -> None:
+    cmd = ["rpicam-still", "--camera", str(camera), "--rotation", str(rotation), "-t", "200",
+           "--width", str(CAPTURE_WIDTH), "--height", str(CAPTURE_HEIGHT), "--ev", str(ev),
+           "-o", str(dst), "--immediate", "-n"]
+    if extra:
+        cmd += shlex.split(extra)
+    print("==> " + " ".join(shlex.quote(c) for c in cmd))
+    subprocess.run(cmd, check=True, timeout=20)
+
+
+def _led_on(use_led: bool, warmup: float) -> bool:
+    if not use_led:
+        return False
+    if _realtime_loop_running():
+        print("[LED] 警告: realtime_loop.py が走行中です。リレーが衝突する可能性があります。", file=sys.stderr)
+    if _set_led(True):
+        print(f"[LED] ON (BCM{RELAY_GPIO})、ウォームアップ {warmup}s")
+        time.sleep(warmup)
+        return True
+    return False
+
+
 def capture(out_dir: Path, *, camera: int, ev: float, rotation: int, extra: str,
             use_led: bool, warmup: float) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y%m%d_%H%M%S")
     dst = out_dir / f"capture_{ts}.jpg"
-    cmd = [
-        "rpicam-still",
-        "--camera", str(camera),
-        "--rotation", str(rotation),
-        "-t", "200",
-        "--width", str(CAPTURE_WIDTH),
-        "--height", str(CAPTURE_HEIGHT),
-        "--ev", str(ev),
-        "-o", str(dst),
-        "--immediate",
-        "-n",
-    ]
-    if extra:
-        cmd += shlex.split(extra)
-
     led_on = False
     try:
-        if use_led:
-            if _realtime_loop_running():
-                print("[LED] 警告: realtime_loop.py が走行中です。リレーが衝突する可能性があります。", file=sys.stderr)
-            led_on = _set_led(True)
-            if led_on:
-                print(f"[LED] ON (BCM{RELAY_GPIO})、ウォームアップ {warmup}s")
-                time.sleep(warmup)
-        print("==> " + " ".join(shlex.quote(c) for c in cmd))
-        subprocess.run(cmd, check=True, timeout=20)
+        led_on = _led_on(use_led, warmup)
+        _rpicam_shot(dst, camera=camera, ev=ev, rotation=rotation, extra=extra)
     finally:
         if led_on:
             _set_led(False)
             print(f"[LED] OFF (BCM{RELAY_GPIO})")
-
     latest = out_dir / "latest.jpg"
     latest.write_bytes(dst.read_bytes())
     print(f"==> saved {dst}  (も {latest})")
     return latest
+
+
+def capture_ev_sweep(out_dir: Path, ev_list: list[float], *, camera: int, rotation: int, extra: str,
+                     use_led: bool, warmup: float) -> Path | None:
+    """EV を ev_list で振って連続撮影 (LED は最初に点けっぱなし)、加工なしの生キャプチャをモンタージュにする。"""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    led_on = False
+    shots: list[tuple[float, Path]] = []
+    try:
+        led_on = _led_on(use_led, warmup)
+        for ev in ev_list:
+            dst = out_dir / f"ev_{ev:+.1f}.jpg"
+            _rpicam_shot(dst, camera=camera, ev=ev, rotation=rotation, extra=extra)
+            shots.append((ev, dst))
+            print(f"==> saved {dst}")
+    finally:
+        if led_on:
+            _set_led(False)
+            print(f"[LED] OFF (BCM{RELAY_GPIO})")
+    cells = []
+    for ev, p in shots:
+        with Image.open(p) as im:
+            im.load()
+            cells.append((f"EV={ev:+.1f}", im.convert("RGB").copy()))
+    if shots:
+        # latest.jpg を真ん中あたりの EV に
+        mid = shots[len(shots) // 2][1]
+        (out_dir / "latest.jpg").write_bytes(mid.read_bytes())
+    _montage(cells, out_dir, cols=5)
+    return out_dir / "sweep.png"
 
 
 def _checkerboard(size: tuple[int, int], cell: int = 12) -> Image.Image:
@@ -424,6 +457,8 @@ def main() -> int:
     ap.add_argument("--levels-black-list", type=_parse_int_list, default=_parse_int_list("0,25,50,75"), help="--sweep-levels の levels_black リスト")
     ap.add_argument("--sweep-wb", action="store_true", help="[shape] --wb-list を振ったモンタージュ (レベル補正なし、基本の明るさを比較)")
     ap.add_argument("--wb-list", type=_parse_int_list, default=_parse_int_list("90,110,130,150,170,190,210,230,245,255"), help="--sweep-wb の wb_target リスト")
+    ap.add_argument("--sweep-ev", action="store_true", help="撮影 EV を --ev-list で振って連続撮影し、加工なしの生キャプチャをモンタージュにする (基本の露出を決める用)")
+    ap.add_argument("--ev-list", type=_parse_float_list, default=_parse_float_list("-2.4,-2.0,-1.6,-1.2,-0.8,-0.4,0.0,0.4,0.8,1.2"), help="--sweep-ev の EV リスト")
     # HDMI 表示
     ap.add_argument("--show", action="store_true", help="処理後に結果を pi-main の HDMI 画面にフルスクリーン表示する")
     ap.add_argument("--show-target", choices=["detect", "crop", "result", "sweep", "mask", "wb"], default="result",
@@ -432,6 +467,15 @@ def main() -> int:
 
     out_dir: Path = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.sweep_ev:
+        capture_ev_sweep(out_dir, args.ev_list, camera=args.camera, rotation=args.rotation,
+                         extra=args.rpicam_extra, use_led=not args.no_led, warmup=args.led_warmup)
+        if args.show:
+            sp = out_dir / "sweep.png"
+            if sp.exists():
+                _show_on_hdmi(sp)
+        return 0
 
     if args.capture:
         src_path = capture(out_dir, camera=args.camera, ev=args.ev, rotation=args.rotation,
