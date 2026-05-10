@@ -1,38 +1,27 @@
 #!/usr/bin/env python3
-"""ゲスト魚トリミング (紙面切り出し → 背景除去 → crop) のチューニング用 CLI。
+"""ゲスト魚切り抜き (紙面 crop → 切り抜き) のチューニング用 CLI。pi-main 上で実行。
 
-realtime_loop.py を立ち上げずに、撮影 → 紙面検出 → 白除去 → トリミング を
-単体で回して詰めるためのツール。pi-main 上で実行する。
-
-処理は 2 段:
-  (1) 紙面検出 (detect_paper_bbox): 撮影画像の周囲に写り込んだ暗いブース枠や
-      画面下部の景色を捨て、白い紙のシートの bbox に crop する。
-  (2) 白除去 (remove_white_background): (1) の中で、絵の線画だけ残して白い
-      紙の部分を透明化し、絵に tight crop + 長辺リサイズ。
-
-依存 (numpy / Pillow / scipy) は fish_ai_realtime の venv に入っているので、
-そちらの python で起動する:
-
+realtime_loop.py を立ち上げずに、撮影 → 紙面検出 → 切り抜き を単体で回して詰める。
+依存 (numpy / Pillow / scipy / opencv) は fish_ai_realtime の venv 経由で起動:
   ~/Documents/fish_ai_realtime/.venv/bin/python ~/Documents/aquarium/web/tune_guest_fish.py --help
 
-典型ワークフロー:
-  1. ブースに絵を置いて撮る + 紙面検出結果を HDMI に映して目視確認
-     (撮影時はブース LED を自動点灯 → warmup → 撮影 → 消灯。--no-led で抑止):
-       ... tune_guest_fish.py --capture --show
-     → tune_out/paper_detect.png (元画像に紙面 bbox を緑枠・外側を暗赤で表示) を
-       HDMI にフルスクリーン表示。tune_out/paper_crop.jpg = 切り出した紙面。
-     紙面の取れ方がずれてたら --paper-v / --paper-s / --paper-pad を調整して再実行。
-     (例: 枠が残る → --paper-v を下げる / --paper-pad を負に。絵の端が切れる → --paper-pad を正に)
-  2. 紙面が決まったら白除去のスイープ → モンタージュ:
-       ... tune_guest_fish.py --sweep --show --show-target sweep
-     → tune_out/sweep.png (HDMI 表示)。v×s は --v-list / --s-list で変更可。
-  3. 単発で白除去マスクを詳しく見る:
-       ... tune_guest_fish.py --v-thresh 210 --s-thresh 35 --show --show-target mask
-     → tune_out/result.png / result_on_checker.png / mask_overlay.png (赤=除去 / 緑枠=crop)
-  4. 良い値が決まったら反映:
-       - 即時 & realtime_loop も含めて効かせる: 起動前に環境変数
-           GUEST_FISH_PAPER_V=160 GUEST_FISH_PAPER_S=90 GUEST_FISH_V_THRESH=210 ...
-       - 恒久化: web/config.json の paper_detect.* / background_removal.* / output.long_edge を編集
+処理は 2 段:
+  (1) 紙面検出 (detect_paper_bbox): 撮影画像の周囲の暗いブース枠/景色を捨てて
+      白い紙の bbox に crop。margins は paper_detect.margins で確定済 ([-73,-80,-32,-80])。
+  (2) 切り抜き (remove_white_background, bg_method で 2 方式):
+      "shape" (既定): 背景差分でインク検出 → 輪郭の隙間を close_px で橋渡し → 中を満たす
+        (色は写真のまま) → 輪郭を smooth で整える。適正露出 (--ev 0) 前提、色かぶりに強い。
+      "hsv" (旧): HSV しきい値で「縁から繋がる白」を透明化。fill_body=True なら中身も埋める。
+
+典型ワークフロー (shape):
+  1. ブースに絵を置いて撮る + 結果を HDMI 確認 (撮影時 LED 自動点灯 → warmup → 撮影 → 消灯):
+       ... --capture --show --show-target result
+     → tune_out/{paper_detect.png, paper_crop.jpg, result.png, result_on_checker.png, mask_overlay.png}
+  2. 輪郭の閉じ具合を比較: ... --sweep-close --show --show-target sweep   (close_px を振る)
+  3. 詳しく見る: ... --close-px 22 --smooth 1.5 --show --show-target mask
+     (mask_overlay = 青:検出インク / 赤:透明化される魚の外 / 境界:最終の輪郭)
+  4. 良い値を反映: env (GUEST_FISH_INK_THRESH / _CLOSE_PX / _SMOOTH / _BG_METHOD ...) か
+     web/config.json の shape_detect.* / bg_method / output.long_edge を編集。
 
 --show は chromium --kiosk で pi-main の HDMI に出す。閉じるのは pkill -f 'chromium.*--kiosk'。
 """
@@ -53,6 +42,8 @@ from guest_fish_pipeline import (  # noqa: E402
     compute_bg_mask,
     compute_silhouette,
     crop_to_paper,
+    fish_mask,
+    ink_mask,
     remove_white_background,
     resolve_paper_params,
     resolve_params,
@@ -194,59 +185,45 @@ def _mask_overlay(src_rgb: np.ndarray, removed: np.ndarray) -> Image.Image:
     return ov
 
 
-def single(src: Image.Image, out_dir: Path, v_thresh, s_thresh, long_edge, fill_body, fill_close) -> None:
-    params = resolve_params(v_thresh, s_thresh, long_edge, fill_body, fill_close)
-    print(f"==> 使用パラメータ: {params}")
+def _params_brief(p: dict) -> str:
+    if p["bg_method"] == "shape":
+        return f"bg_method=shape ink_thresh={p['ink_thresh']} bg_blur={p['bg_blur']} close_px={p['close_px']} smooth={p['smooth']} long_edge={p['long_edge']}"
+    return f"bg_method=hsv v_thresh={p['v_thresh']} s_thresh={p['s_thresh']} fill_body={p['fill_body']} fill_close={p['fill_close']} long_edge={p['long_edge']}"
+
+
+def _shape_mask_overlay(src_rgb: np.ndarray, ink: np.ndarray, fm: np.ndarray) -> Image.Image:
+    """青=検出インク, 赤=魚の外(透明化される), それ以外=元のまま。境界が最終の輪郭。"""
+    ov = src_rgb.astype(np.float32).copy()
+    ov[ink] = ov[ink] * 0.35 + np.array([40, 120, 255], np.float32) * 0.65
+    ov[~fm] = ov[~fm] * 0.30 + np.array([255, 45, 45], np.float32) * 0.70
+    return Image.fromarray(np.clip(ov, 0, 255).astype(np.uint8), "RGB")
+
+
+def single(src: Image.Image, out_dir: Path, **kw) -> None:
+    p = resolve_params(**kw)
+    print(f"==> 使用パラメータ: {_params_brief(p)}")
     src_rgb = np.array(src.convert("RGB"))
 
-    result = remove_white_background(src, v_thresh=params["v_thresh"], s_thresh=params["s_thresh"],
-                                     long_edge=params["long_edge"], fill_body=params["fill_body"],
-                                     fill_close=params["fill_close"])
+    result = remove_white_background(src, **p)
     res_path = out_dir / "result.png"
     result.save(res_path)
     _on_checker(result).convert("RGB").save(out_dir / "result_on_checker.png")
     print(f"==> 結果 {result.size[0]}x{result.size[1]} -> {res_path} (+ result_on_checker.png)")
 
-    if params["fill_body"]:
-        sil = compute_silhouette(src_rgb, v_thresh=params["v_thresh"], s_thresh=params["s_thresh"], close_px=params["fill_close"])
-        removed = ~sil
-        note = f"赤=透明化される範囲 / 緑枠=crop 範囲 (fill_body, close={params['fill_close']})"
+    if p["bg_method"] == "shape":
+        ink = ink_mask(src_rgb, thresh=p["ink_thresh"], blur=p["bg_blur"])
+        fm = fish_mask(src_rgb, ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"], close_px=p["close_px"], smooth=p["smooth"])
+        _shape_mask_overlay(src_rgb, ink, fm).save(out_dir / "mask_overlay.png")
+        print(f"==> マスク可視化 (青=検出インク / 赤=透明化(魚の外) / 境界=最終の輪郭) -> {out_dir / 'mask_overlay.png'}")
     else:
-        removed = compute_bg_mask(src_rgb, v_thresh=params["v_thresh"], s_thresh=params["s_thresh"])
-        note = "赤=除去 / 緑枠=crop 範囲"
-    ov_path = out_dir / "mask_overlay.png"
-    _mask_overlay(src_rgb, removed).save(ov_path)
-    print(f"==> マスク可視化 ({note}) -> {ov_path}")
-
-
-def sweep(src: Image.Image, out_dir: Path, v_list: list[int], s_list: list[int], long_edge,
-          fill_body, fill_close) -> None:
-    p0 = resolve_params(None, None, long_edge, fill_body, fill_close)
-    le, fb, fc = p0["long_edge"], p0["fill_body"], p0["fill_close"]
-    tile = 300
-    label_h = 22
-    pad = 8
-    cell_w = tile + pad
-    cell_h = tile + label_h + pad
-    cols, rows = len(v_list), len(s_list)
-    sheet = Image.new("RGB", (cols * cell_w + pad, rows * cell_h + pad), (255, 255, 255))
-    d = ImageDraw.Draw(sheet)
-    font = _font(13)
-    print(f"==> v×s スイープ (fill_body={fb}{f', close={fc}' if fb else ''})")
-    for ri, s in enumerate(s_list):
-        for ci, v in enumerate(v_list):
-            res = remove_white_background(src, v_thresh=v, s_thresh=s, long_edge=le, fill_body=fb, fill_close=fc)
-            thumb = _fit(_on_checker(res).convert("RGB"), (tile, tile))
-            x0 = pad + ci * cell_w
-            y0 = pad + ri * cell_h
-            tw, th = thumb.size
-            tx = x0 + (tile - tw) // 2
-            ty = y0 + label_h + (tile - th) // 2
-            sheet.paste(thumb, (tx, ty))
-            d.rectangle([tx, ty, tx + tw - 1, ty + th - 1], outline=(170, 170, 170))
-            d.text((x0 + 2, y0 + 3), f"v={v} s={s}  {res.size[0]}x{res.size[1]}", fill=(0, 0, 0), font=font)
-            print(f"  v={v:>3} s={s:>3} -> {res.size[0]}x{res.size[1]}")
-    _save_sheet(sheet, out_dir)
+        if p["fill_body"]:
+            removed = ~compute_silhouette(src_rgb, v_thresh=p["v_thresh"], s_thresh=p["s_thresh"], close_px=p["fill_close"])
+            note = f"赤=透明化される範囲 / 緑枠=crop (fill_body, close={p['fill_close']})"
+        else:
+            removed = compute_bg_mask(src_rgb, v_thresh=p["v_thresh"], s_thresh=p["s_thresh"])
+            note = "赤=除去 / 緑枠=crop"
+        _mask_overlay(src_rgb, removed).save(out_dir / "mask_overlay.png")
+        print(f"==> マスク可視化 ({note}) -> {out_dir / 'mask_overlay.png'}")
 
 
 def _save_sheet(sheet: Image.Image, out_dir: Path) -> None:
@@ -257,31 +234,58 @@ def _save_sheet(sheet: Image.Image, out_dir: Path) -> None:
     print("    ブラウザで:        http://raspberrypi.local:8080/tune_out/sweep.png")
 
 
-def sweep_close(src: Image.Image, out_dir: Path, close_list: list[int], v_thresh, s_thresh, long_edge) -> None:
-    """fill_body=True 固定で fill_close を振ったモンタージュ (魚の体を埋める強さの比較)。"""
-    p0 = resolve_params(v_thresh, s_thresh, long_edge, True, None)
-    v, s, le = p0["v_thresh"], p0["s_thresh"], p0["long_edge"]
-    tile = 320
+def _montage(cells: list[tuple[str, Image.Image]], out_dir: Path, *, cols: int, tile: int = 320) -> None:
     label_h = 22
     pad = 8
-    n = len(close_list)
-    cols = min(n, 3)
-    rows = (n + cols - 1) // cols
+    rows = (len(cells) + cols - 1) // cols
     sheet = Image.new("RGB", (cols * (tile + pad) + pad, rows * (tile + label_h + pad) + pad), (255, 255, 255))
     d = ImageDraw.Draw(sheet)
-    font = _font(14)
-    print(f"==> fill_close スイープ (fill_body=True, v={v} s={s})")
-    for i, ck in enumerate(close_list):
-        res = remove_white_background(src, v_thresh=v, s_thresh=s, long_edge=le, fill_body=True, fill_close=ck)
-        thumb = _fit(_on_checker(res).convert("RGB"), (tile, tile))
+    font = _font(13)
+    for i, (label, im) in enumerate(cells):
+        thumb = _fit(_on_checker(im).convert("RGB"), (tile, tile))
         ci, ri = i % cols, i // cols
         x0 = pad + ci * (tile + pad)
         y0 = pad + ri * (tile + label_h + pad)
         tw, th = thumb.size
         sheet.paste(thumb, (x0 + (tile - tw) // 2, y0 + label_h + (tile - th) // 2))
-        d.text((x0 + 2, y0 + 3), f"close={ck}  {res.size[0]}x{res.size[1]}", fill=(0, 0, 0), font=font)
-        print(f"  close={ck:>3} -> {res.size[0]}x{res.size[1]}")
+        d.rectangle([x0 + (tile - tw) // 2, y0 + label_h + (tile - th) // 2,
+                     x0 + (tile - tw) // 2 + tw - 1, y0 + label_h + (tile - th) // 2 + th - 1], outline=(170, 170, 170))
+        d.text((x0 + 2, y0 + 3), label, fill=(0, 0, 0), font=font)
     _save_sheet(sheet, out_dir)
+
+
+def sweep_vs(src: Image.Image, out_dir: Path, v_list: list[int], s_list: list[int], **kw) -> None:
+    """bg_method=hsv: v×s グリッド。fill_body はそのまま使う。"""
+    p = resolve_params(**kw)
+    cells = []
+    print(f"==> v×s スイープ (hsv, fill_body={p['fill_body']})")
+    for s in s_list:
+        for v in v_list:
+            res = remove_white_background(src, bg_method="hsv", v_thresh=v, s_thresh=s,
+                                          fill_body=p["fill_body"], fill_close=p["fill_close"], long_edge=p["long_edge"])
+            cells.append((f"v={v} s={s}  {res.size[0]}x{res.size[1]}", res))
+            print(f"  v={v:>3} s={s:>3} -> {res.size[0]}x{res.size[1]}")
+    _montage(cells, out_dir, cols=len(v_list))
+
+
+def sweep_close(src: Image.Image, out_dir: Path, close_list: list[int], **kw) -> None:
+    """shape: close_px を振る。hsv: fill_body=True 固定で fill_close を振る。"""
+    p = resolve_params(**kw)
+    is_shape = p["bg_method"] == "shape"
+    cells = []
+    print(f"==> {'close_px (shape)' if is_shape else 'fill_close (hsv)'} スイープ")
+    for ck in close_list:
+        if is_shape:
+            res = remove_white_background(src, bg_method="shape", ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"],
+                                          close_px=ck, smooth=p["smooth"], long_edge=p["long_edge"])
+            label = f"close_px={ck}  {res.size[0]}x{res.size[1]}"
+        else:
+            res = remove_white_background(src, bg_method="hsv", v_thresh=p["v_thresh"], s_thresh=p["s_thresh"],
+                                          fill_body=True, fill_close=ck, long_edge=p["long_edge"])
+            label = f"fill_close={ck}  {res.size[0]}x{res.size[1]}"
+        cells.append((label, res))
+        print(f"  {ck:>3} -> {res.size[0]}x{res.size[1]}")
+    _montage(cells, out_dir, cols=min(len(close_list), 3))
 
 
 def _paper_detect_visual(src: Image.Image, bbox, *, fit_to=(1900, 1060)) -> Image.Image:
@@ -334,7 +338,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="ゲスト魚トリミングのチューニング CLI", formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     ap.add_argument("--capture", action="store_true", help="rpicam-still で 1 枚撮って tune_out/latest.jpg に保存してから処理する")
     ap.add_argument("--camera", type=int, default=0, help="撮影に使うカメラ index (既定 0 = IMX219)")
-    ap.add_argument("--ev", type=float, default=0.5, help="撮影時の露出補正 EV (既定 0.5、本番と同値)")
+    ap.add_argument("--ev", type=float, default=0.0, help="撮影時の露出補正 EV (既定 0 = 適正露出。色を飛ばさないため)")
     ap.add_argument("--rotation", type=int, default=180, help="撮影時の回転角 (既定 180、本番と同値)")
     ap.add_argument("--rpicam-extra", default="", help="rpicam-still に渡す追加引数 (例: '--awb tungsten --shutter 8000')")
     ap.add_argument("--no-led", action="store_true", help="撮影時にブース LED を点灯しない (既定は点灯する)")
@@ -347,20 +351,29 @@ def main() -> int:
     ap.add_argument("--paper-pad", help="紙面 bbox を 4 辺一律に広げる px。負で内側に縮める (例: -100)")
     ap.add_argument("--paper-margins", help="紙面 bbox を辺ごとに広げる px 'L,T,R,B' (例: '-90,-90,-40,-90')。負で内側。--paper-pad より優先")
     ap.add_argument("--no-paper-crop", action="store_true", help="紙面トリミングをせず、撮影画像そのまま白除去にかける")
-    # 白除去 (紙面を切り出した後、絵だけ残して背景を透明化)
-    ap.add_argument("--v-thresh", type=int, help="白除去の value 閾値 (省略時は env/config/既定値)")
-    ap.add_argument("--s-thresh", type=int, help="白除去の saturation 閾値 (省略時は env/config/既定値)")
-    ap.add_argument("--long-edge", type=int, help="出力長辺 px (省略時は env/config/既定値)")
+    # 切り抜き方式
+    ap.add_argument("--bg-method", choices=["shape", "hsv"], dest="bg_method", default=None,
+                    help="shape=形ベース(背景差分→輪郭を閉じる→中を満たす→輪郭整え) / hsv=旧 白除去。省略時は config/既定(shape)")
+    # shape 用
+    ap.add_argument("--ink-thresh", type=int, dest="ink_thresh", help="背景差分でインクとみなす残差しきい値 (省略時 config/既定 28)。下げると薄いインクも拾う")
+    ap.add_argument("--bg-blur", type=int, dest="bg_blur", help="紙の面を推定するメディアンぼかし ksize (省略時 0=自動)")
+    ap.add_argument("--close-px", type=int, dest="close_px", help="輪郭の隙間を橋渡しする膨張量 px (省略時 config/既定 18)")
+    ap.add_argument("--smooth", type=float, help="輪郭整え: approxPolyDP epsilon を周長の何% にするか (0=整えない、省略時 config/既定 1.0)")
+    # hsv 用 (旧)
+    ap.add_argument("--v-thresh", type=int, dest="v_thresh", help="[hsv] value 閾値 (省略時 env/config/既定)")
+    ap.add_argument("--s-thresh", type=int, dest="s_thresh", help="[hsv] saturation 閾値 (省略時 env/config/既定)")
     ap.add_argument("--fill-body", dest="fill_body", action="store_const", const=True, default=None,
-                    help="魚の中身 (白く塗り残された体) まで不透明にする (teamLab Sketch Aquarium 風)。省略時は env/config/既定")
-    ap.add_argument("--no-fill-body", dest="fill_body", action="store_const", const=False,
-                    help="魚の中身を埋めず、線画+色+閉じた白だけ残す (開いた輪郭の中は素通し)")
-    ap.add_argument("--fill-close", type=int, help="--fill-body の輪郭隙間を埋める強さ px (省略時は env/config/既定 25)")
-    ap.add_argument("--sweep", action="store_true", help="白除去の v×s グリッドを総当たりして sweep.png を出す")
-    ap.add_argument("--v-list", type=_parse_int_list, default=_parse_int_list("180,190,200,210,220"), help="--sweep の value 閾値リスト (カンマ区切り)")
-    ap.add_argument("--s-list", type=_parse_int_list, default=_parse_int_list("20,30,40,50"), help="--sweep の saturation 閾値リスト (カンマ区切り)")
-    ap.add_argument("--sweep-close", action="store_true", help="fill_body=True 固定で --close-list の各 fill_close を総当たりして sweep.png を出す")
-    ap.add_argument("--close-list", type=_parse_int_list, default=_parse_int_list("10,15,20,25,30,40"), help="--sweep-close の fill_close リスト (カンマ区切り)")
+                    help="[hsv] 魚の中身まで不透明にする (省略時 env/config/既定)")
+    ap.add_argument("--no-fill-body", dest="fill_body", action="store_const", const=False, help="[hsv] 魚の中身を埋めない")
+    ap.add_argument("--fill-close", type=int, dest="fill_close", help="[hsv] fill_body の輪郭隙間を埋める強さ px (省略時 env/config/既定 25)")
+    # 共通
+    ap.add_argument("--long-edge", type=int, dest="long_edge", help="出力長辺 px (省略時 env/config/既定 600)")
+    # スイープ
+    ap.add_argument("--sweep", action="store_true", help="[hsv] v×s グリッドのモンタージュを出す")
+    ap.add_argument("--v-list", type=_parse_int_list, default=_parse_int_list("180,190,200,210,220"), help="--sweep の value リスト")
+    ap.add_argument("--s-list", type=_parse_int_list, default=_parse_int_list("20,30,40,50"), help="--sweep の saturation リスト")
+    ap.add_argument("--sweep-close", action="store_true", help="--close-list を振ったモンタージュ (shape=close_px / hsv=fill_close)")
+    ap.add_argument("--close-list", type=_parse_int_list, default=_parse_int_list("8,12,18,25,35,50"), help="--sweep-close のリスト")
     # HDMI 表示
     ap.add_argument("--show", action="store_true", help="処理後に結果を pi-main の HDMI 画面にフルスクリーン表示する")
     ap.add_argument("--show-target", choices=["detect", "crop", "result", "sweep", "mask"], default="detect",
@@ -400,14 +413,17 @@ def main() -> int:
     print(f"==> 紙面確認画像 -> {detect_path}")
     print(f"==> 切り出した紙面 -> {crop_path}")
 
-    # 2) 白除去フェーズ (紙面を切り出した後の画像に対して)
+    # 2) 切り抜きフェーズ (紙面を切り出した後の画像に対して)
     work = src if (args.no_paper_crop or bbox is None) else crop_img
+    proc_kw = dict(bg_method=args.bg_method, ink_thresh=args.ink_thresh, bg_blur=args.bg_blur,
+                   close_px=args.close_px, smooth=args.smooth, v_thresh=args.v_thresh, s_thresh=args.s_thresh,
+                   fill_body=args.fill_body, fill_close=args.fill_close, long_edge=args.long_edge)
     if args.sweep_close:
-        sweep_close(work, out_dir, args.close_list, args.v_thresh, args.s_thresh, args.long_edge)
+        sweep_close(work, out_dir, args.close_list, **proc_kw)
     elif args.sweep:
-        sweep(work, out_dir, args.v_list, args.s_list, args.long_edge, args.fill_body, args.fill_close)
+        sweep_vs(work, out_dir, args.v_list, args.s_list, **proc_kw)
     else:
-        single(work, out_dir, args.v_thresh, args.s_thresh, args.long_edge, args.fill_body, args.fill_close)
+        single(work, out_dir, **proc_kw)
 
     # 3) HDMI 表示
     if args.show:

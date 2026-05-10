@@ -15,16 +15,25 @@
     "margins": [-73, -80, -32, -80],
     "_comment": "撮影画像から白い紙のシートだけを切り出す。明るくて (V>=value_threshold) 彩度の低い (S<=saturation_threshold) 領域以外で、画像の縁から連結しているもの (暗いブース枠/影/外の景色) を flood fill で除外し、残った最大領域を紙面とする。margins=[left,top,right,bottom] は紙面 bbox を各辺に広げる px (負で内側に縮める)。負値はレンズ歪みで四隅に出るボックスのフチを切り落とす用。2026-05-10 にこのカメラ位置・ボックスで [-80,-80,-25,-80] に確定。配置が変わったら tune_guest_fish.py で取り直し。0 / [0,0,0,0] で無効化"
   },
+  "bg_method": "shape",
+  "_bg_method_comment": "ゲスト魚の切り抜き方式。'shape' = 形ベース (背景差分でインク検出→輪郭の隙間を膨張で橋渡し→中を満たす→輪郭を整える。輪郭の内側は写真のまま、外だけ透明。露出/色かぶりに強い)。'hsv' = 旧 (HSV しきい値で縁から繋がる白を透明化)。",
+  "shape_detect": {
+    "ink_thresh": 28,
+    "bg_blur": 0,
+    "close_px": 18,
+    "smooth": 1.0,
+    "_comment": "shape 方式のパラメータ。ink_thresh = 紙からの局所残差がこれ以上ならインク (下げると薄いインクも拾うがノイズも)。bg_blur = 紙の面を推定するメディアンぼかし ksize (0=画像サイズから自動 ~画像長辺の2.7%)。close_px = 輪郭の隙間 (開いた口/ヒレ/ペンの途切れ) を橋渡しする膨張量 px (大きすぎると細部がくっつく)。smooth = 輪郭整え: approxPolyDP の epsilon を周長の何% にするか (0=整えない、大きいほどなめらか/単純化)。2026-05-10 にこのカメラ/ボックスで要調整。"
+  },
   "background_removal": {
     "value_threshold": 200,
     "saturation_threshold": 30,
-    "_comment": "紙面を切り出した後の画像に対して、HSV で V >= value_threshold かつ S <= saturation_threshold のピクセルを「白っぽい候補」とみなし、画像の縁から flood fill で繋がる部分のみを背景として透明化する。魚の中の白 (目玉等) は縁から繋がらないので残る"
+    "_comment": "bg_method=hsv のとき: 紙面を切り出した後の画像に対して HSV で V>=value_threshold かつ S<=saturation_threshold を「白っぽい候補」とみなし、画像の縁から flood fill で繋がる部分のみ透明化する"
   },
   "output": {
     "long_edge": 600,
     "fill_body": true,
     "fill_close": 25,
-    "_comment": "fill_body=true で魚の中身 (白く塗り残された体) まで不透明にする (teamLab Sketch Aquarium 風)。輪郭線の隙間 (開いた口・ヒレの切れ目) を fill_close px ぶん橋渡しして閉じてから穴埋め。小さいと中空のまま、大きすぎると細い部分が太る/くっつく。2026-05-10 にこのカメラ/絵で要調整。false なら従来どおり線画+色+閉じた白だけ残る。long_edge は出力の長辺 px"
+    "_comment": "long_edge = 出力の長辺 px (全方式共通)。fill_body / fill_close は bg_method=hsv 専用 (fill_body=true で魚の中身を埋める。shape 方式では中身は常に満たされるので無関係)"
   },
   "upload": {
     "max_bytes": 26214400,

@@ -4,17 +4,23 @@ Phase 1 (upload_server.py) と Phase 2/3 (fish_ai_realtime/realtime_loop.py の
 音声シャッター / 物理ボタン) の両方から使われる。HTTP/aiohttp 依存はせず、
 純粋な画像処理 + メタデータ I/O のみ提供する。
 
-本番環境 (固定カメラ + 紙だけが映る撮影ブース) を前提にしたシンプル実装。
-HSV 閾値で「白っぽいピクセル」を判定し、画像の縁から flood fill で繋がる
-部分のみを背景として透明化する。fill_body=True なら輪郭線の隙間を埋めて
-魚の中身 (白く塗り残された体) も不透明にする (teamLab Sketch Aquarium 風)。
+本番環境 (固定カメラ + 紙だけが映る撮影ブース、適正露出) を前提。切り抜きは
+bg_method で 2 方式:
+  "shape" (既定): 背景差分でインクを拾う → 輪郭の隙間を膨張で橋渡しして閉じる →
+      中を alpha で満たす (色は元のまま) → 輪郭をなめらかに整える。露出/色かぶりに強い。
+  "hsv" (旧): HSV しきい値で「縁から繋がる白」を透明化。fill_body=True なら中身も埋める。
 
 各パラメータの決まり方 (優先順): 関数引数 > 環境変数 > config.json > 既定値。
-  v_thresh    GUEST_FISH_V_THRESH       background_removal.value_threshold       200
+  bg_method   GUEST_FISH_BG_METHOD      bg_method                            "shape"
+  ink_thresh  GUEST_FISH_INK_THRESH     shape_detect.ink_thresh                  28   # shape
+  bg_blur     GUEST_FISH_BG_BLUR        shape_detect.bg_blur                      0   # 0=自動
+  close_px    GUEST_FISH_CLOSE_PX       shape_detect.close_px                    18
+  smooth      GUEST_FISH_SMOOTH         shape_detect.smooth                     1.0
+  v_thresh    GUEST_FISH_V_THRESH       background_removal.value_threshold       200   # hsv
   s_thresh    GUEST_FISH_S_THRESH       background_removal.saturation_threshold   30
-  long_edge   GUEST_FISH_LONG_EDGE      output.long_edge                         600
   fill_body   GUEST_FISH_FILL_BODY      output.fill_body                       False
   fill_close  GUEST_FISH_FILL_CLOSE     output.fill_close                         25
+  long_edge   GUEST_FISH_LONG_EDGE      output.long_edge                         600
 紙面検出側 (detect_paper_bbox) は別途 paper_detect.* / GUEST_FISH_PAPER_* 参照。
 チューニングは web/tune_guest_fish.py で raw 画像に対してオフラインで詰め、
 良い値が出たら config.json か env に反映する (env なら realtime_loop 再起動だけで即時)。
@@ -29,7 +35,18 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageOps
 
-_DEFAULTS = {"v_thresh": 200, "s_thresh": 30, "long_edge": 600, "fill_body": False, "fill_close": 25}
+_DEFAULTS = {
+    "bg_method": "shape",   # "shape" = 形ベース (背景差分→輪郭を閉じる→中を満たす→輪郭整える) / "hsv" = 旧 白除去
+    # shape 用
+    "ink_thresh": 28,       # 紙からの局所残差がこれ以上ならインク。下げると薄いインクも拾う/ノイズも拾う
+    "bg_blur": 0,           # 紙の面を推定するメディアンぼかしの ksize (0 = 画像サイズから自動)
+    "close_px": 18,         # 輪郭の隙間 (開いた口・ヒレ・ペンの途切れ) を橋渡しする膨張量 px。大きすぎると細部がくっつく
+    "smooth": 1.0,          # 輪郭整え: approxPolyDP の epsilon を周長の何 % にするか。0 でスムージング無し
+    # hsv 用 (旧)
+    "v_thresh": 200, "s_thresh": 30, "fill_body": False, "fill_close": 25,
+    # 共通
+    "long_edge": 600,
+}
 _CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 _cfg_cache: dict | None = None
 
@@ -48,6 +65,13 @@ def _load_config() -> dict:
 def _as_int(value) -> int | None:
     try:
         return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(value) -> float | None:
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return None
 
@@ -86,16 +110,27 @@ def _config_value(cfg_path: tuple[str, ...]):
 
 def _resolve_int(explicit, env_name: str, cfg_path: tuple[str, ...], default: int) -> int:
     """引数 > 環境変数 > config.json > 既定値 の優先順で int を解決する。"""
-    if explicit is not None:
-        v = _as_int(explicit)
+    for cand in (explicit, os.environ.get(env_name), _config_value(cfg_path)):
+        v = _as_int(cand)
         if v is not None:
             return v
-    v = _as_int(os.environ.get(env_name))
-    if v is not None:
-        return v
-    v = _as_int(_config_value(cfg_path))
-    if v is not None:
-        return v
+    return default
+
+
+def _resolve_float(explicit, env_name: str, cfg_path: tuple[str, ...], default: float) -> float:
+    """引数 > 環境変数 > config.json > 既定値 の優先順で float を解決する。"""
+    for cand in (explicit, os.environ.get(env_name), _config_value(cfg_path)):
+        v = _as_float(cand)
+        if v is not None:
+            return v
+    return default
+
+
+def _resolve_str(explicit, env_name: str, cfg_path: tuple[str, ...], default: str) -> str:
+    """引数 > 環境変数 > config.json > 既定値 の優先順で文字列 (小文字化) を解決する。"""
+    for cand in (explicit, os.environ.get(env_name), _config_value(cfg_path)):
+        if isinstance(cand, str) and cand.strip():
+            return cand.strip().lower()
     return default
 
 
@@ -124,14 +159,23 @@ def _parse_margins(value) -> tuple[int, int, int, int] | None:
     return None
 
 
-def resolve_params(v_thresh=None, s_thresh=None, long_edge=None, fill_body=None, fill_close=None) -> dict:
-    """remove_white_background が実際に使うパラメータを返す (CLI からの確認用)。"""
+def resolve_params(v_thresh=None, s_thresh=None, long_edge=None, fill_body=None, fill_close=None,
+                   bg_method=None, ink_thresh=None, bg_blur=None, close_px=None, smooth=None) -> dict:
+    """remove_white_background / cutout_guest_fish が実際に使うパラメータを 引数 > env > config > 既定 で解決して返す。"""
     return {
+        "bg_method": _resolve_str(bg_method, "GUEST_FISH_BG_METHOD", ("bg_method",), _DEFAULTS["bg_method"]),
+        # shape
+        "ink_thresh": _resolve_int(ink_thresh, "GUEST_FISH_INK_THRESH", ("shape_detect", "ink_thresh"), _DEFAULTS["ink_thresh"]),
+        "bg_blur": _resolve_int(bg_blur, "GUEST_FISH_BG_BLUR", ("shape_detect", "bg_blur"), _DEFAULTS["bg_blur"]),
+        "close_px": _resolve_int(close_px, "GUEST_FISH_CLOSE_PX", ("shape_detect", "close_px"), _DEFAULTS["close_px"]),
+        "smooth": _resolve_float(smooth, "GUEST_FISH_SMOOTH", ("shape_detect", "smooth"), _DEFAULTS["smooth"]),
+        # hsv (旧)
         "v_thresh": _resolve_int(v_thresh, "GUEST_FISH_V_THRESH", ("background_removal", "value_threshold"), _DEFAULTS["v_thresh"]),
         "s_thresh": _resolve_int(s_thresh, "GUEST_FISH_S_THRESH", ("background_removal", "saturation_threshold"), _DEFAULTS["s_thresh"]),
-        "long_edge": _resolve_int(long_edge, "GUEST_FISH_LONG_EDGE", ("output", "long_edge"), _DEFAULTS["long_edge"]),
         "fill_body": _resolve_bool(fill_body, "GUEST_FISH_FILL_BODY", ("output", "fill_body"), _DEFAULTS["fill_body"]),
         "fill_close": _resolve_int(fill_close, "GUEST_FISH_FILL_CLOSE", ("output", "fill_close"), _DEFAULTS["fill_close"]),
+        # 共通
+        "long_edge": _resolve_int(long_edge, "GUEST_FISH_LONG_EDGE", ("output", "long_edge"), _DEFAULTS["long_edge"]),
     }
 
 
@@ -205,6 +249,119 @@ def compute_silhouette(rgb: np.ndarray, *, v_thresh: int, s_thresh: int, close_p
     else:
         sil = ndimage.binary_fill_holes(not_bg)
     return _largest_component(sil)
+
+
+# ─── 形ベース (shape) パイプライン ──────────────────────────────
+# 適正露出 (色が飛んでいない) の撮影を前提に、画素のしきい値ではなく「魚の形」を
+# 捉えて切り抜く。1) 背景差分でインクを拾う → 2) 隙間を膨張で橋渡しして輪郭を閉じる
+# → 3) 中を alpha で満たす (色は元のまま) → 4) 輪郭をなめらかに整える。
+def _paper_background(rgb: np.ndarray, blur: int) -> np.ndarray:
+    """紙の面 (ビネット・色かぶり込みの、なだらかに変化する成分) をメディアンぼかしで推定。"""
+    import cv2
+    h, w = rgb.shape[:2]
+    k = int(blur) if blur and blur > 0 else max(9, int(round(max(h, w) * 0.027)))
+    if k % 2 == 0:
+        k += 1
+    return cv2.medianBlur(np.ascontiguousarray(rgb), k)
+
+
+def ink_mask(rgb: np.ndarray, *, thresh: int, blur: int = 0) -> np.ndarray:
+    """背景差分でインク (色・明るさ問わず) を拾った bool マスク。
+
+    紙の面を _paper_background で推定し、元画像との残差 (チャンネルごとの差の最大) が
+    thresh 以上をインクとみなす。なだらかな照明ムラ (ビネット・ピンクかぶり) は残差が
+    ほぼ 0 なので除外される。
+    """
+    bg = _paper_background(rgb, blur)
+    resid = np.abs(rgb.astype(np.int16) - bg.astype(np.int16)).max(axis=2)
+    return resid >= int(thresh)
+
+
+def _smooth_mask(mask: np.ndarray, eps_pct: float) -> np.ndarray:
+    """mask の最大外周コンターを approxPolyDP + Chaikin で整え、塗り直したマスクを返す。
+
+    eps_pct は approxPolyDP の epsilon を周長の何 % にするか。0 以下なら何もしない。
+    """
+    if eps_pct is None or eps_pct <= 0:
+        return mask
+    import cv2
+    m = (mask.astype(np.uint8)) * 255
+    contours = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[-2]  # 3.x/4.x 両対応
+    if not contours:
+        return mask
+    cnt = max(contours, key=cv2.contourArea)
+    peri = cv2.arcLength(cnt, True)
+    eps = max(1.5, peri * float(eps_pct) / 100.0)
+    poly = cv2.approxPolyDP(cnt, eps, True).reshape(-1, 2).astype(np.float64)
+    for _ in range(2):  # Chaikin で角を丸める
+        if len(poly) < 3:
+            break
+        nxt = np.roll(poly, -1, axis=0)
+        poly = np.column_stack([
+            np.ravel(np.column_stack([0.75 * poly[:, 0] + 0.25 * nxt[:, 0], 0.25 * poly[:, 0] + 0.75 * nxt[:, 0]])),
+            np.ravel(np.column_stack([0.75 * poly[:, 1] + 0.25 * nxt[:, 1], 0.25 * poly[:, 1] + 0.75 * nxt[:, 1]])),
+        ])
+    out = np.zeros(mask.shape, dtype=np.uint8)
+    cv2.fillPoly(out, [np.round(poly).astype(np.int32)], 1)
+    return out.astype(bool)
+
+
+def fish_mask(rgb: np.ndarray, *, ink_thresh: int, bg_blur: int = 0, close_px: int = 18, smooth: float = 1.0) -> np.ndarray:
+    """魚の形 (中身まで満たした) の bool マスクを返す。alpha に使う。色 (RGB) は呼び出し側で元のまま。
+
+    インク検出 → close_px だけ膨張で輪郭の隙間を橋渡し → 最大連結成分 → 穴埋め →
+    同じだけ収縮 → 輪郭整え (smooth)。
+    """
+    from scipy import ndimage
+    m = ink_mask(rgb, thresh=ink_thresh, blur=bg_blur)
+    k = max(0, int(close_px))
+    if k > 0:
+        m = ndimage.binary_dilation(m, iterations=k)
+        m = _largest_component(m)
+        m = ndimage.binary_fill_holes(m)
+        m = ndimage.binary_erosion(m, iterations=k, border_value=1)
+    else:
+        m = ndimage.binary_fill_holes(_largest_component(m))
+    return _smooth_mask(m, smooth)
+
+
+def _crop_and_resize_rgba(rgb: np.ndarray, alpha: np.ndarray, long_edge: int) -> Image.Image:
+    """alpha>0 の bbox に crop して RGBA を返す。透明部分の RGB は 0 に潰す (見えないが念のため)。"""
+    alpha = alpha.astype(np.uint8)
+    ys, xs = np.where(alpha > 0)
+    if len(ys) == 0:
+        return Image.fromarray(np.dstack([rgb.astype(np.uint8), alpha]), "RGBA")
+    t, b, l, r = int(ys.min()), int(ys.max()) + 1, int(xs.min()), int(xs.max()) + 1
+    rgb_c = rgb[t:b, l:r].astype(np.uint8).copy()
+    a_c = alpha[t:b, l:r]
+    rgb_c[a_c == 0] = 0
+    out = Image.fromarray(np.dstack([rgb_c, a_c]), "RGBA")
+    w, h = out.size
+    if long_edge and max(w, h) > long_edge:
+        if w >= h:
+            out = out.resize((long_edge, max(1, round(h * long_edge / w))), Image.LANCZOS)
+        else:
+            out = out.resize((max(1, round(w * long_edge / h)), long_edge), Image.LANCZOS)
+    return out
+
+
+def cutout_guest_fish(
+    img: Image.Image,
+    *,
+    ink_thresh: int | None = None,
+    bg_blur: int | None = None,
+    close_px: int | None = None,
+    smooth: float | None = None,
+    long_edge: int | None = None,
+) -> Image.Image:
+    """形ベースで魚を切り抜いた RGBA を返す。輪郭の内側は撮った写真のまま、外側は透明。"""
+    p = resolve_params(long_edge=long_edge, bg_method="shape", ink_thresh=ink_thresh,
+                       bg_blur=bg_blur, close_px=close_px, smooth=smooth)
+    img = ImageOps.exif_transpose(img).convert("RGB")
+    rgb = np.array(img)
+    mask = fish_mask(rgb, ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"], close_px=p["close_px"], smooth=p["smooth"])
+    alpha = np.where(mask, 255, 0).astype(np.uint8)
+    return _crop_and_resize_rgba(rgb, alpha, p["long_edge"])
 
 
 # ─── 紙面検出 (撮影画像から白い紙のシートだけを切り出す) ──────────
@@ -312,52 +469,49 @@ def crop_to_paper(
 def remove_white_background(
     img: Image.Image,
     *,
+    bg_method: str | None = None,
+    # shape 用
+    ink_thresh: int | None = None,
+    bg_blur: int | None = None,
+    close_px: int | None = None,
+    smooth: float | None = None,
+    # hsv 用 (旧)
     v_thresh: int | None = None,
     s_thresh: int | None = None,
-    long_edge: int | None = None,
     fill_body: bool | None = None,
     fill_close: int | None = None,
+    # 共通
+    long_edge: int | None = None,
 ) -> Image.Image:
-    """白い紙の背景を透明化 → トリミング & 長辺リサイズ。
+    """ゲスト魚を切り抜いた RGBA を返す。bg_method ("shape" 既定 / "hsv") で方式を選ぶ。
 
-    省略した引数は env / config.json / 既定値の順で解決される (モジュール
-    docstring 参照)。本番環境 (固定カメラ + 紙だけが映る撮影ブース) を前提。
+    省略した引数は env / config.json / 既定値の順で解決される (モジュール docstring 参照)。
+    本番 (固定カメラ + 紙だけが映る撮影ブース、適正露出) を前提。
 
-    fill_body=True のときは「縁から繋がる白だけ透明化」ではなく、輪郭線の隙間を
-    fill_close px ぶん橋渡しして閉じ、魚の中身 (白く塗り残された体) まで不透明に
-    する (teamLab Sketch Aquarium 風)。False (既定) なら従来どおり線画 + 色 +
-    閉じた白 (目玉等) だけが残り、開いた輪郭の中は素通しになる。
+    - "shape": 背景差分でインクを拾い → 輪郭の隙間を close_px で橋渡し → 中を満たし →
+      輪郭を smooth で整える。輪郭の内側は撮った写真のまま、外側は透明。露出や色かぶりに強い。
+    - "hsv" (旧): HSV しきい値で「縁から繋がる白」を透明化。fill_body=True なら魚の中身も埋める。
     """
-    params = resolve_params(v_thresh, s_thresh, long_edge, fill_body, fill_close)
-    v_thresh, s_thresh, long_edge = params["v_thresh"], params["s_thresh"], params["long_edge"]
-    fill_body, fill_close = params["fill_body"], params["fill_close"]
+    params = resolve_params(v_thresh, s_thresh, long_edge, fill_body, fill_close,
+                            bg_method, ink_thresh, bg_blur, close_px, smooth)
+    long_edge = params["long_edge"]
 
+    if params["bg_method"] == "shape":
+        return cutout_guest_fish(img, ink_thresh=params["ink_thresh"], bg_blur=params["bg_blur"],
+                                 close_px=params["close_px"], smooth=params["smooth"], long_edge=long_edge)
+
+    # ── 旧 HSV 方式 ──
+    v_thresh, s_thresh = params["v_thresh"], params["s_thresh"]
+    fill_body, fill_close = params["fill_body"], params["fill_close"]
     img = ImageOps.exif_transpose(img).convert("RGB")
     rgb = np.array(img)
-
     if fill_body:
         sil = compute_silhouette(rgb, v_thresh=v_thresh, s_thresh=s_thresh, close_px=fill_close)
         alpha = np.where(sil, 255, 0).astype(np.uint8)
-        rgba = np.dstack([rgb.astype(np.uint8), alpha])
     else:
         bg_mask = compute_bg_mask(rgb, v_thresh=v_thresh, s_thresh=s_thresh)
-        rgba = np.dstack([rgb.astype(np.uint8), np.full(rgb.shape[:2], 255, dtype=np.uint8)])
-        rgba[bg_mask] = [0, 0, 0, 0]
-    out = Image.fromarray(rgba, "RGBA")
-
-    bbox = out.getbbox()
-    if bbox:
-        out = out.crop(bbox)
-
-    w, h = out.size
-    if max(w, h) > long_edge:
-        if w >= h:
-            new_size = (long_edge, max(1, int(h * long_edge / w)))
-        else:
-            new_size = (max(1, int(w * long_edge / h)), long_edge)
-        out = out.resize(new_size, Image.LANCZOS)
-
-    return out
+        alpha = np.where(bg_mask, 0, 255).astype(np.uint8)
+    return _crop_and_resize_rgba(rgb, alpha, long_edge)
 
 
 # ─── メタデータ I/O ────────────────────────────────────
