@@ -486,14 +486,16 @@ def fish_mask(rgb: np.ndarray, *, ink_thresh: int, bg_blur: int = 0, close_px: i
         bridged = _bridge_endpoint_gaps(ink, max_gap=2 * k)            # 隙間を直線で閉じる (太らせない)
         sealed = ndimage.binary_closing(bridged, structure=np.ones((3, 3)), iterations=2)  # 残った ~2px の隙間だけ
         lc = _largest_component(sealed)
-        body = ndimage.binary_fill_holes(lc)                           # 閉じた輪郭の中を満たす
-        if body.sum() < 2.2 * int(lc.sum()):
-            # 直線つなぎで輪郭が閉じ切らず中空 → モルフォロジー (太い円弧) でフォールバック
+        if ndimage.binary_fill_holes(lc).sum() >= 2.2 * int(lc.sum()):
+            body = ndimage.binary_fill_holes(sealed)                   # 閉じた輪郭の中をすべて満たす (体 + 閉じた腹びれ等も)
+        else:
+            # 直線つなぎで体が閉じ切らず中空 → モルフォロジー (太い円弧) でフォールバック
             grown = _largest_component(ndimage.binary_dilation(bridged, iterations=k))
             body = ndimage.binary_erosion(ndimage.binary_fill_holes(grown), iterations=k, border_value=1)
+            body = ndimage.binary_fill_holes(body | sealed)            # フォールバックでも閉じたヒレ等を埋める
     else:
         bridged = ink
-        body = ndimage.binary_fill_holes(_largest_component(ink))
+        body = ndimage.binary_fill_holes(ink)
     if smooth and smooth > 0:
         body = _smooth_mask(body, smooth)
     mask = _keep_main_blob(body | ink, near_px=max(8, k))
@@ -505,7 +507,7 @@ def fish_mask(rgb: np.ndarray, *, ink_thresh: int, bg_blur: int = 0, close_px: i
         removable = reach & mask & passable                            # 透明に隣接する白
         if 0 < removable.sum() < 0.5 * mask.sum():                     # 体内部まで漏れてない場合だけ適用
             mask = _keep_main_blob((mask & ~removable) | (ink & mask), near_px=max(8, k))
-    return mask
+    return ndimage.binary_fill_holes(mask)
 
 
 def _crop_and_resize_rgba(rgb: np.ndarray, alpha: np.ndarray, long_edge: int) -> Image.Image:
