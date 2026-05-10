@@ -191,6 +191,7 @@ def _mask_overlay(src_rgb: np.ndarray, removed: np.ndarray) -> Image.Image:
 def _params_brief(p: dict) -> str:
     if p["bg_method"] == "shape":
         return (f"bg_method=shape white_balance={p['white_balance']} wb_target={p['wb_target']} "
+                f"levels(black={p['levels_black']} white={p['levels_white']} gamma={p['levels_gamma']}) "
                 f"ink_thresh={p['ink_thresh']} bg_blur={p['bg_blur']} close_px={p['close_px']} smooth={p['smooth']} long_edge={p['long_edge']}")
     return f"bg_method=hsv v_thresh={p['v_thresh']} s_thresh={p['s_thresh']} fill_body={p['fill_body']} fill_close={p['fill_close']} long_edge={p['long_edge']}"
 
@@ -214,8 +215,9 @@ def single(src: Image.Image, out_dir: Path, **kw) -> None:
     print(f"==> 結果 {result.size[0]}x{result.size[1]} -> {res_path} (+ result_on_checker.png)")
 
     if p["bg_method"] == "shape":
-        src_rgb = prepare_rgb(src, white_balance=p["white_balance"], wb_target=p["wb_target"], bg_blur=p["bg_blur"])
-        Image.fromarray(src_rgb, "RGB").save(out_dir / "wb_preview.jpg", quality=92)  # 正規化後の見た目
+        src_rgb = prepare_rgb(src, white_balance=p["white_balance"], wb_target=p["wb_target"], bg_blur=p["bg_blur"],
+                              levels_black=p["levels_black"], levels_white=p["levels_white"], levels_gamma=p["levels_gamma"])
+        Image.fromarray(src_rgb, "RGB").save(out_dir / "wb_preview.jpg", quality=92)  # 正規化+レベル補正後の見た目
         ink = ink_mask(src_rgb, thresh=p["ink_thresh"], blur=p["bg_blur"])
         fm = fish_mask(src_rgb, ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"], close_px=p["close_px"], smooth=p["smooth"])
         _shape_mask_overlay(src_rgb, ink, fm).save(out_dir / "mask_overlay.png")
@@ -295,6 +297,21 @@ def sweep_close(src: Image.Image, out_dir: Path, close_list: list[int], **kw) ->
     _montage(cells, out_dir, cols=min(len(close_list), 3))
 
 
+def sweep_levels(src: Image.Image, out_dir: Path, black_list: list[int], **kw) -> None:
+    """shape 固定で levels_black を振ったモンタージュ (= 全体の明るさ/締まりを 4 段階くらい比較)。"""
+    p = resolve_params(**kw)
+    cells = []
+    print(f"==> levels_black スイープ (shape, levels_white={p['levels_white']} wb_target={p['wb_target']})")
+    for bk in black_list:
+        res = remove_white_background(src, bg_method="shape", white_balance=p["white_balance"], wb_target=p["wb_target"],
+                                      levels_black=bk, levels_white=p["levels_white"], levels_gamma=p["levels_gamma"],
+                                      ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"], close_px=p["close_px"],
+                                      smooth=p["smooth"], long_edge=p["long_edge"])
+        cells.append((f"levels_black={bk}  {res.size[0]}x{res.size[1]}", res))
+        print(f"  levels_black={bk:>3} -> {res.size[0]}x{res.size[1]}")
+    _montage(cells, out_dir, cols=min(len(black_list), 4))
+
+
 def _paper_detect_visual(src: Image.Image, bbox, *, fit_to=(1900, 1060)) -> Image.Image:
     """元画像を画面サイズに収めて、検出した紙面 bbox を緑枠で、外側を暗く塗った確認用画像。"""
     base = src.convert("RGB").copy()
@@ -366,6 +383,9 @@ def main() -> int:
                     help="紙で正規化 (flat-field: ビネット/色かぶりを消す、黒インクを黒に)。省略時 config/既定(on)")
     ap.add_argument("--no-white-balance", dest="white_balance", action="store_const", const=False, help="紙の正規化をしない")
     ap.add_argument("--wb-target", type=int, dest="wb_target", help="正規化後の紙の明るさ (省略時 config/既定 245)。低いほど暗め")
+    ap.add_argument("--levels-black", type=int, dest="levels_black", help="レベル補正の黒点 (省略時 config/既定 20)。上げるほどインク/暗部が締まり全体が暗く")
+    ap.add_argument("--levels-white", type=int, dest="levels_white", help="レベル補正の白点 (省略時 config/既定 225)。下げるほど薄いグレーが白に飛ぶ")
+    ap.add_argument("--levels-gamma", type=float, dest="levels_gamma", help="レベル補正の中間調 gamma (省略時 config/既定 1.0、<1 で暗く)")
     ap.add_argument("--ink-thresh", type=int, dest="ink_thresh", help="背景差分でインクとみなす残差しきい値 (省略時 config/既定 28)。下げると薄いインクも拾う")
     ap.add_argument("--bg-blur", type=int, dest="bg_blur", help="紙の面を推定するメディアンぼかし ksize (省略時 0=自動)")
     ap.add_argument("--close-px", type=int, dest="close_px", help="輪郭の隙間を橋渡しする膨張量 px (省略時 config/既定 40)")
@@ -385,6 +405,8 @@ def main() -> int:
     ap.add_argument("--s-list", type=_parse_int_list, default=_parse_int_list("20,30,40,50"), help="--sweep の saturation リスト")
     ap.add_argument("--sweep-close", action="store_true", help="--close-list を振ったモンタージュ (shape=close_px / hsv=fill_close)")
     ap.add_argument("--close-list", type=_parse_int_list, default=_parse_int_list("8,12,18,25,35,50"), help="--sweep-close のリスト")
+    ap.add_argument("--sweep-levels", action="store_true", help="[shape] --levels-black-list を振ったモンタージュ (4 段階くらいの明るさ比較)")
+    ap.add_argument("--levels-black-list", type=_parse_int_list, default=_parse_int_list("0,25,50,75"), help="--sweep-levels の levels_black リスト")
     # HDMI 表示
     ap.add_argument("--show", action="store_true", help="処理後に結果を pi-main の HDMI 画面にフルスクリーン表示する")
     ap.add_argument("--show-target", choices=["detect", "crop", "result", "sweep", "mask", "wb"], default="result",
@@ -427,10 +449,13 @@ def main() -> int:
     # 2) 切り抜きフェーズ (紙面を切り出した後の画像に対して)
     work = src if (args.no_paper_crop or bbox is None) else crop_img
     proc_kw = dict(bg_method=args.bg_method, white_balance=args.white_balance, wb_target=args.wb_target,
+                   levels_black=args.levels_black, levels_white=args.levels_white, levels_gamma=args.levels_gamma,
                    ink_thresh=args.ink_thresh, bg_blur=args.bg_blur, close_px=args.close_px, smooth=args.smooth,
                    v_thresh=args.v_thresh, s_thresh=args.s_thresh, fill_body=args.fill_body, fill_close=args.fill_close,
                    long_edge=args.long_edge)
-    if args.sweep_close:
+    if args.sweep_levels:
+        sweep_levels(work, out_dir, args.levels_black_list, **proc_kw)
+    elif args.sweep_close:
         sweep_close(work, out_dir, args.close_list, **proc_kw)
     elif args.sweep:
         sweep_vs(work, out_dir, args.v_list, args.s_list, **proc_kw)

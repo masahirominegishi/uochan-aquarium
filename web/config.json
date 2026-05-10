@@ -25,11 +25,14 @@
   "shape_detect": {
     "white_balance": true,
     "wb_target": 245,
+    "levels_black": 20,
+    "levels_white": 225,
+    "levels_gamma": 1.0,
     "ink_thresh": 28,
     "bg_blur": 0,
     "close_px": 40,
     "smooth": 0.0,
-    "_comment": "shape 方式のパラメータ。white_balance=true で紙の面 (なだらかな照明ムラ/色かぶり/ビネット) を推定して割り、wb_target に正規化 (flat-field) → 黒インクが黒に、色が正しく、ビネット消える。wb_target = 正規化後の紙の明るさ (低いほど暗め)。ink_thresh = 紙からの局所残差がこれ以上ならインク (下げると薄いインクも拾うがノイズも)。bg_blur = 紙の面を推定するメディアンぼかし ksize (0=画像サイズから自動、WB と ink 検出で共用)。close_px = 輪郭の隙間 (開いた口/ヒレ/ペンの途切れ) を橋渡しする膨張量 px (小さいと中が埋まらない、大きすぎると細部がくっつく)。元のインク (輪郭線・色・尖った先端) は close_px や smooth に関わらず必ず足し戻すのでシャープに残る。smooth = ベタ面 (塗り残し/隙間の橋渡しの縁) を approxPolyDP で整える epsilon を周長の何% にするか (0=整えない、シャープ)。2026-05-10 にこのカメラ/絵で white_balance=true wb_target=245 close_px=40 smooth=0 から。撮影 EV は -0.7。"
+    "_comment": "shape 方式のパラメータ。white_balance=true で紙の面 (なだらかな照明ムラ/色かぶり/ビネット) を推定して割り wb_target に正規化 (flat-field, 黒インクが黒に・色が正しく・ビネット消える)。その後 levels (Photoshop のレベル補正相当): 入力 [levels_black, levels_white] を [0,255] に伸長 + levels_gamma。levels_black を上げる→暗部/インクが締まり全体が暗く / levels_white を下げる→薄いグレー (ベタッとしたグレー) が白に飛ぶ / levels_gamma<1 で中間調が暗く。ink_thresh = 紙からの局所残差がこれ以上ならインク。bg_blur = 紙の面のメディアンぼかし ksize (0=自動)。close_px = 輪郭の隙間を橋渡しする膨張量 px。元インク (輪郭線/色/尖り) は close_px/smooth に関わらず必ず足し戻す。smooth = ベタ面の縁を approxPolyDP で整える epsilon を周長の何% (0=シャープ)。撮影 EV は -0.7。2026-05-10 にこのカメラ/絵で要調整。"
   },
   "background_removal": {
     "value_threshold": 200,

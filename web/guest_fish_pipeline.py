@@ -41,7 +41,11 @@ _DEFAULTS = {
     "bg_method": "shape",   # "shape" = 形ベース (背景差分→輪郭を閉じる→中を満たす→輪郭整える) / "hsv" = 旧 白除去
     # shape 用
     "white_balance": True,  # 紙の面 (なだらかな照明ムラ/色かぶり/ビネット) で割って正規化 (flat-field)。黒インクが黒に、色が正しく出る
-    "wb_target": 245,       # 正規化後の紙の明るさ。低いほど暗め。255 に近すぎると飛ぶ
+    "wb_target": 245,       # 正規化後の紙の明るさ。低いほど全体が暗め
+    # レベル補正 (flat-field の後、Photoshop の「レベル」相当: 入力 [black,white] を [0,255] に伸長 + gamma)
+    "levels_black": 20,     # これ以下は黒に。上げるほどインク/暗部が締まる (= 全体が暗く締まる)
+    "levels_white": 225,    # これ以上は白に。下げるほど薄いグレー (ベタッとしたグレー) が白に飛ぶ
+    "levels_gamma": 1.0,    # 中間調 (1.0=変えない、<1 で暗く、>1 で明るく)
     "ink_thresh": 28,       # 紙からの局所残差がこれ以上ならインク。下げると薄いインクも拾う/ノイズも拾う
     "bg_blur": 0,           # 紙の面を推定するメディアンぼかしの ksize (0 = 画像サイズから自動)。WB と ink 検出で共用
     "close_px": 40,         # 輪郭の隙間 (開いた口・ヒレ・ペンの途切れ) を橋渡しする膨張量 px。小さいと中が埋まらない、大きすぎると細部がくっつく
@@ -165,13 +169,16 @@ def _parse_margins(value) -> tuple[int, int, int, int] | None:
 
 def resolve_params(v_thresh=None, s_thresh=None, long_edge=None, fill_body=None, fill_close=None,
                    bg_method=None, ink_thresh=None, bg_blur=None, close_px=None, smooth=None,
-                   white_balance=None, wb_target=None) -> dict:
+                   white_balance=None, wb_target=None, levels_black=None, levels_white=None, levels_gamma=None) -> dict:
     """remove_white_background / cutout_guest_fish が実際に使うパラメータを 引数 > env > config > 既定 で解決して返す。"""
     return {
         "bg_method": _resolve_str(bg_method, "GUEST_FISH_BG_METHOD", ("bg_method",), _DEFAULTS["bg_method"]),
         # shape
         "white_balance": _resolve_bool(white_balance, "GUEST_FISH_WHITE_BALANCE", ("shape_detect", "white_balance"), _DEFAULTS["white_balance"]),
         "wb_target": _resolve_int(wb_target, "GUEST_FISH_WB_TARGET", ("shape_detect", "wb_target"), _DEFAULTS["wb_target"]),
+        "levels_black": _resolve_int(levels_black, "GUEST_FISH_LEVELS_BLACK", ("shape_detect", "levels_black"), _DEFAULTS["levels_black"]),
+        "levels_white": _resolve_int(levels_white, "GUEST_FISH_LEVELS_WHITE", ("shape_detect", "levels_white"), _DEFAULTS["levels_white"]),
+        "levels_gamma": _resolve_float(levels_gamma, "GUEST_FISH_LEVELS_GAMMA", ("shape_detect", "levels_gamma"), _DEFAULTS["levels_gamma"]),
         "ink_thresh": _resolve_int(ink_thresh, "GUEST_FISH_INK_THRESH", ("shape_detect", "ink_thresh"), _DEFAULTS["ink_thresh"]),
         "bg_blur": _resolve_int(bg_blur, "GUEST_FISH_BG_BLUR", ("shape_detect", "bg_blur"), _DEFAULTS["bg_blur"]),
         "close_px": _resolve_int(close_px, "GUEST_FISH_CLOSE_PX", ("shape_detect", "close_px"), _DEFAULTS["close_px"]),
@@ -285,6 +292,23 @@ def flat_field(rgb: np.ndarray, *, blur: int = 0, target: int = 245) -> np.ndarr
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
+def levels(rgb: np.ndarray, *, black: int = 0, white: int = 255, gamma: float = 1.0) -> np.ndarray:
+    """Photoshop の「レベル補正」相当: 入力レンジ [black, white] を [0, 255] に伸長 + 中間調 gamma。
+
+    - black を上げる → それ以下が黒に締まる (インク/暗部が濃く、全体が暗く)
+    - white を下げる → それ以上が白に飛ぶ (薄いグレー = ベタッとしたグレーが消えて白に)
+    - gamma < 1 → 中間調が暗く / > 1 → 明るく
+    """
+    black, white, gamma = int(black), int(white), float(gamma)
+    if black <= 0 and white >= 255 and abs(gamma - 1.0) < 1e-6:
+        return rgb
+    span = max(1, white - black)
+    lin = np.clip((rgb.astype(np.float32) - black) / span, 0.0, 1.0)
+    if abs(gamma - 1.0) >= 1e-6:
+        lin = np.power(lin, 1.0 / max(gamma, 1e-3))
+    return np.clip(lin * 255.0 + 0.5, 0, 255).astype(np.uint8)
+
+
 def ink_mask(rgb: np.ndarray, *, thresh: int, blur: int = 0) -> np.ndarray:
     """背景差分でインク (色・明るさ問わず) を拾った bool マスク。
 
@@ -368,15 +392,18 @@ def _crop_and_resize_rgba(rgb: np.ndarray, alpha: np.ndarray, long_edge: int) ->
     return out
 
 
-def prepare_rgb(img: Image.Image, *, white_balance=None, wb_target=None, bg_blur=None) -> np.ndarray:
-    """切り抜き前処理: EXIF 補正 + RGB 化 + (white_balance なら) 紙で正規化した RGB 配列を返す。
+def prepare_rgb(img: Image.Image, *, white_balance=None, wb_target=None, bg_blur=None,
+                levels_black=None, levels_white=None, levels_gamma=None) -> np.ndarray:
+    """切り抜き前処理: EXIF 補正 + RGB 化 + (white_balance なら) 紙で正規化 + レベル補正した RGB 配列を返す。
 
     tune_guest_fish.py がマスク可視化を本処理と同じ画像で行うために共有する。
     """
-    p = resolve_params(bg_blur=bg_blur, white_balance=white_balance, wb_target=wb_target, bg_method="shape")
+    p = resolve_params(bg_blur=bg_blur, white_balance=white_balance, wb_target=wb_target, bg_method="shape",
+                       levels_black=levels_black, levels_white=levels_white, levels_gamma=levels_gamma)
     rgb = np.array(ImageOps.exif_transpose(img).convert("RGB"))
     if p["white_balance"]:
         rgb = flat_field(rgb, blur=p["bg_blur"], target=p["wb_target"])
+    rgb = levels(rgb, black=p["levels_black"], white=p["levels_white"], gamma=p["levels_gamma"])
     return rgb
 
 
@@ -385,16 +412,21 @@ def cutout_guest_fish(
     *,
     white_balance: bool | None = None,
     wb_target: int | None = None,
+    levels_black: int | None = None,
+    levels_white: int | None = None,
+    levels_gamma: float | None = None,
     ink_thresh: int | None = None,
     bg_blur: int | None = None,
     close_px: int | None = None,
     smooth: float | None = None,
     long_edge: int | None = None,
 ) -> Image.Image:
-    """形ベースで魚を切り抜いた RGBA を返す。輪郭の内側は (WB 後の) 写真のまま、外側は透明。"""
+    """形ベースで魚を切り抜いた RGBA を返す。輪郭の内側は (WB + レベル補正後の) 写真のまま、外側は透明。"""
     p = resolve_params(long_edge=long_edge, bg_method="shape", ink_thresh=ink_thresh, bg_blur=bg_blur,
-                       close_px=close_px, smooth=smooth, white_balance=white_balance, wb_target=wb_target)
-    rgb = prepare_rgb(img, white_balance=p["white_balance"], wb_target=p["wb_target"], bg_blur=p["bg_blur"])
+                       close_px=close_px, smooth=smooth, white_balance=white_balance, wb_target=wb_target,
+                       levels_black=levels_black, levels_white=levels_white, levels_gamma=levels_gamma)
+    rgb = prepare_rgb(img, white_balance=p["white_balance"], wb_target=p["wb_target"], bg_blur=p["bg_blur"],
+                      levels_black=p["levels_black"], levels_white=p["levels_white"], levels_gamma=p["levels_gamma"])
     mask = fish_mask(rgb, ink_thresh=p["ink_thresh"], bg_blur=p["bg_blur"], close_px=p["close_px"], smooth=p["smooth"])
     alpha = np.where(mask, 255, 0).astype(np.uint8)
     return _crop_and_resize_rgba(rgb, alpha, p["long_edge"])
@@ -509,6 +541,9 @@ def remove_white_background(
     # shape 用
     white_balance: bool | None = None,
     wb_target: int | None = None,
+    levels_black: int | None = None,
+    levels_white: int | None = None,
+    levels_gamma: float | None = None,
     ink_thresh: int | None = None,
     bg_blur: int | None = None,
     close_px: int | None = None,
@@ -531,13 +566,16 @@ def remove_white_background(
     - "hsv" (旧): HSV しきい値で「縁から繋がる白」を透明化。fill_body=True なら魚の中身も埋める。
     """
     params = resolve_params(v_thresh, s_thresh, long_edge, fill_body, fill_close,
-                            bg_method, ink_thresh, bg_blur, close_px, smooth, white_balance, wb_target)
+                            bg_method, ink_thresh, bg_blur, close_px, smooth, white_balance, wb_target,
+                            levels_black, levels_white, levels_gamma)
     long_edge = params["long_edge"]
 
     if params["bg_method"] == "shape":
         return cutout_guest_fish(img, white_balance=params["white_balance"], wb_target=params["wb_target"],
-                                 ink_thresh=params["ink_thresh"], bg_blur=params["bg_blur"],
-                                 close_px=params["close_px"], smooth=params["smooth"], long_edge=long_edge)
+                                 levels_black=params["levels_black"], levels_white=params["levels_white"],
+                                 levels_gamma=params["levels_gamma"], ink_thresh=params["ink_thresh"],
+                                 bg_blur=params["bg_blur"], close_px=params["close_px"], smooth=params["smooth"],
+                                 long_edge=long_edge)
 
     # ── 旧 HSV 方式 ──
     v_thresh, s_thresh = params["v_thresh"], params["s_thresh"]
