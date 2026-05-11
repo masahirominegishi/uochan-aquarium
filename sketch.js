@@ -26,9 +26,17 @@ let parts = {};      // { imageName: p5.Image } : 12 パーツの透過 PNG
 // p5.sound は使わず素の HTMLAudioElement で再生する (preload をブロックしない / ライブラリ不要)。
 let sndDrop = null;  // sound/drop.mp3
 let sndInto = null;  // sound/into.mp3
-// 起動直後の初期同期 (bridge が既存の魚を全部 fish_added で送ってくる) では鳴らさないためのフラグ。
-// ページ表示から数秒経つまで false にしておく。
-let _soundReady = false;
+
+// 起動直後の初期同期: bridge が既存の魚を全部 fish_added で送ってくる。
+// これを「ぜんぶ一斉にポンと出す」のではなく、キューに溜めて 1 匹ずつ時間差で
+// 「上からドロップイン」させる (音なし / サイズ・レイヤーは通常)。
+//   millis() < _STARTUP_WINDOW_MS の間に来た fish_added → キュー行き (= 初期同期の既存魚)
+//   それ以降に来た fish_added                          → 即ドロップイン + 着水音 (= ライブの新規登録)
+const _STARTUP_WINDOW_MS         = 3000;
+const _STARTUP_SPAWN_INTERVAL_MS = 500;
+let _startupQueue       = [];     // [{ imageUrl, options }]
+let _lastStartupSpawnAt = -_STARTUP_SPAWN_INTERVAL_MS;  // 最初の 1 匹はすぐ出す
+let _startupSpawnIdx    = 0;      // golden-ratio で x をばらけさせるためのカウンタ
 
 // うおちゃんの 12 パーツ。preload で全部読み込む。
 const UOCHAN_IMAGES = [
@@ -54,6 +62,10 @@ function preload() {
 function setup() {
   // ウィンドウサイズいっぱいのキャンバスを作成
   createCanvas(windowWidth, windowHeight);
+
+  // 60fps だと Pi 5 の CPU(canvas2d 描画)を 1.8 コアぶん回してファンが全開になる。
+  // 水槽の動きはゆったりなので 30fps で十分。CPU ≒ 半分、温度・ファンが下がる。
+  frameRate(30);
 
   // 楕円の中心を「左上」ではなく「中央」基準にする（魚の描画を素直に書きたいので）
   ellipseMode(CENTER);
@@ -100,16 +112,16 @@ function setup() {
     sndDrop = sndInto = null;
   }
 
-  // 起動直後の初期同期 (接続時に既存の魚が一気に fish_added で飛んでくる) で効果音が
-  // 鳴らないように、表示から少し経ってから効果音を解禁する。
-  setTimeout(() => { _soundReady = true; }, 4000);
+  // 起動時の既存魚は draw() 内のディスペンサが _startupQueue から 1 匹ずつ取り出して
+  // 時間差でドロップインさせる (音なし)。_STARTUP_WINDOW_MS を過ぎてから来た fish_added は
+  // ライブの新規登録扱いで即ドロップイン + 着水音。
 }
 
 // ゲスト魚が水槽に入る瞬間の効果音: drop → (ended で) into。
 // ブラウザの autoplay 制限により、ページに一度もユーザー操作がない状態だと play() は
 // 拒否される。フルスクリーンボタンを一度押せば以降は鳴る。拒否時は静かに無視する。
 function _playGuestFishEnterSound() {
-  if (!_soundReady || !sndDrop) return;
+  if (!sndDrop) return;
   try {
     sndDrop.currentTime = 0;
     sndDrop.play().catch(() => {});
@@ -134,6 +146,17 @@ function draw() {
   // 4) 気泡を更新＆描画
   _updateAndDrawBubbles();
 
+  // 4.5) 起動時の既存魚をキューから 1 匹ずつ時間差でドロップインさせる (音なし)。
+  //      x は golden-ratio の低食い違い列で画面幅に均等ばらけ + わずかなジッタ。
+  if (_startupQueue.length > 0 && millis() - _lastStartupSpawnAt > _STARTUP_SPAWN_INTERVAL_MS) {
+    const item = _startupQueue.shift();
+    const PHI = 0.6180339887;
+    const fx = width * (0.10 + 0.80 * ((_startupSpawnIdx * PHI) % 1)) + random(-width * 0.03, width * 0.03);
+    _startupSpawnIdx += 1;
+    window.aquarium._spawnGuestFish(item.imageUrl, item.options, { startupEntry: true, withSound: false, x: fx });
+    _lastStartupSpawnAt = millis();
+  }
+
   // 5) 魚を更新 → 描画。レイヤー (奥→手前):
   //      奥  : 飼い主不在 / 未登録の小さいゲスト魚
   //      中  : 飼い主在席 / 今日新しく入った大きいゲスト魚
@@ -155,14 +178,17 @@ function draw() {
 // 背景：水のグラデーション
 // -------------------------------------------------------------
 function _drawWaterBackground() {
-  // 上：明るい水色 / 下：深い青
-  const top    = color(120, 200, 230);
-  const bottom = color(10, 50, 100);
-  for (let y = 0; y < height; y++) {
-    const t = y / height;
-    stroke(lerpColor(top, bottom, t));
-    line(0, y, width, y);
-  }
+  // 上：明るい水色 / 下：深い青。
+  // 旧実装は毎フレーム height 本の line() を描いていて重かった(1080行×60fps ≒ 65k 呼び/秒)。
+  // canvas2d ネイティブの linearGradient で 1 回の fillRect に置き換え (ほぼ無コスト)。
+  const ctx = drawingContext;
+  ctx.save();
+  const g = ctx.createLinearGradient(0, 0, 0, height);
+  g.addColorStop(0, 'rgb(120, 200, 230)');
+  g.addColorStop(1, 'rgb(10, 50, 100)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, width, height);
+  ctx.restore();
 }
 
 // -------------------------------------------------------------
@@ -332,31 +358,41 @@ window.aquarium = {
   // ゲスト魚を追加 (ws-client.js から呼ばれる)
   // imageUrl から非同期に画像を読み込み、GuestFish として guestFishes 配列に push
   addGuestFish(imageUrl, options = {}) {
-    // 同じ id が既に存在すれば追加せず ownerPersonId だけ更新する (welcome 多重防止)
+    // 同じ id が既に居る / キューに居る → 追加せず ownerPersonId だけ更新 (welcome 多重防止)
     if (options.id) {
       const existing = guestFishes.find((g) => g.id === options.id);
       if (existing) {
         if (options.ownerPersonId !== undefined) existing.setOwnerPersonId(options.ownerPersonId);
         return;
       }
+      if (_startupQueue.some((q) => q.options && q.options.id === options.id)) return;
     }
+    // 起動直後のウィンドウ中に来た fish_added は「初期同期の既存魚」とみなしてキューへ
+    // (draw() のディスペンサが時間差でドロップインさせる、音なし)。
+    // それ以降に来たものは「ライブの新規登録」として即ドロップイン + 着水音。
+    if (millis() < _STARTUP_WINDOW_MS) {
+      _startupQueue.push({ imageUrl, options });
+      return;
+    }
+    this._spawnGuestFish(imageUrl, options, { dropIn: true, withSound: true });
+  },
+
+  // 画像を読み込んで GuestFish を生成する共通ルーチン。
+  //   opts: { dropIn?, startupEntry?, withSound?, x? }
+  _spawnGuestFish(imageUrl, options = {}, opts = {}) {
     loadImage(
       imageUrl,
       (img) => {
-        // _soundReady が立っている = 起動直後の初期同期ではなく「いま新しく登録された魚」。
-        // 新規登録のときだけ「上からドボン」のドロップイン + 着水時に効果音。
-        // 初期同期(_soundReady=false の間)はドロップなし・音なしでその場に出現 (従来通り)。
-        const isNewArrival = _soundReady;
         const fish = new GuestFish(img, {
           ...options,
-          dropIn: isNewArrival,
-          onSplash: isNewArrival ? () => _playGuestFishEnterSound() : null,
+          ...(opts.x !== undefined ? { x: opts.x } : {}),
+          dropIn: !!opts.dropIn,
+          startupEntry: !!opts.startupEntry,
+          onSplash: opts.withSound ? () => _playGuestFishEnterSound() : null,
         });
         guestFishes.push(fish);
-        console.log(
-          `[aquarium] guest fish added: ${fish.id} (total ${guestFishes.length})` +
-          (isNewArrival ? ' [drop-in]' : '')
-        );
+        const tag = opts.dropIn ? ' [drop-in]' : (opts.startupEntry ? ' [startup]' : '');
+        console.log(`[aquarium] guest fish added: ${fish.id} (total ${guestFishes.length})${tag}`);
       },
       (err) => {
         console.warn(`[aquarium] failed to load guest fish image: ${imageUrl}`, err);

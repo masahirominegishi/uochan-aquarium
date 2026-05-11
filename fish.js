@@ -285,22 +285,27 @@ class GuestFish {
     this.highlightStartedAt = 0;
     this.excitedUntil = 0;          // 飼い主に気づいた瞬間からこの時刻まで「気づいたよ!」リアクション
 
-    // ドロップイン (新規登録時のみ true)。落下〜着水中はサイズ big 固定。
-    this.dropIn     = !!options.dropIn;
-    this.entering   = this.dropIn;
-    this.entryPhase = this.dropIn ? 'falling' : 'done';   // falling -> sinking -> done
-    this.onSplash   = typeof options.onSplash === 'function' ? options.onSplash : null;
-    this.settleY    = 0;
-    this.splashedAt = 0;
-    this.splashX    = 0;
+    // 入場演出:
+    //  - dropIn:       今日新規登録された魚。上からドロップイン + 着水音 + その日ずっと big。
+    //  - startupEntry: 起動時に既存魚を 1 匹ずつ時間差で「上からドロップイン」させるとき。
+    //                  音なし、サイズ・レイヤーは通常 (飼い主不在なら small)。
+    this.dropIn       = !!options.dropIn;
+    this.startupEntry = !!options.startupEntry;
+    this.entering     = this.dropIn || this.startupEntry;
+    this.entryPhase   = this.entering ? 'falling' : 'done';   // falling -> sinking -> done
+    this.onSplash     = typeof options.onSplash === 'function' ? options.onSplash : null;
+    this.settleY      = 0;
+    this.splashedAt   = 0;
+    this.splashX      = 0;
 
     // 初期位置・速度
-    if (this.dropIn) {
-      this.x  = options.x !== undefined ? options.x : random(width * 0.25, width * 0.75);
-      this.y  = -this._longest * this.bigScale * 0.7;   // 画面上端より上
+    if (this.entering) {
+      this.x  = options.x !== undefined ? options.x : random(width * 0.15, width * 0.85);
+      // 入場開始時のサイズ: 新規登録は big、起動時の既存魚は通常 (= 飼い主不在なら small)
+      this.scale = this.dropIn ? this.bigScale : this.smallScale;
+      this.y  = -this._longest * this.scale * 0.7;            // 画面上端より上から落とす
       this.vx = (random() < 0.5 ? -1 : 1) * random(0.35, 0.7);  // 着水後に使う水平速度
       this.vy = GUEST_DROP_VY0;
-      this.scale = this.bigScale;
     } else {
       this.x  = options.x !== undefined ? options.x : random(width * 0.2, width * 0.8);
       this.y  = options.y !== undefined ? options.y : random(height * 0.25, height * 0.7);
@@ -321,11 +326,12 @@ class GuestFish {
     this.tailPhase = random(TWO_PI);
     this.bobPhase  = random(TWO_PI);
 
-    // スライス設定 (Fish._drawSpine と同等)
+    // スライス設定 (Fish._drawSpine と同等)。waveAmpTail / waveSpeed は個体差を出すため
+    // 1 匹ずつランダム化 (位相だけでなく振り幅・速さも変えて「みんな揃って見える」のを防ぐ)。
     this.strips      = options.strips      || 22;
     this.waveAmpHead = options.waveAmpHead || 1;
-    this.waveAmpTail = options.waveAmpTail || 14;
-    this.waveSpeed   = options.waveSpeed   || 0.16;
+    this.waveAmpTail = options.waveAmpTail || random(11, 17);
+    this.waveSpeed   = options.waveSpeed   || random(0.13, 0.20);
   }
 
   // -----------------------------------------------------------
@@ -345,12 +351,11 @@ class GuestFish {
   }
 
   // 「前面(大)グループ」に入るか:
-  //  - 落下〜着水中 (entering)
-  //  - 今日新しく入った魚 (dropIn) … その日はずっと前のまま (ページ再読込=翌日の電源 ON でリセット)
+  //  - 今日新しく入った魚 (dropIn) … その日はずっと前(大)のまま (ページ再読込=翌日の電源 ON でリセット)
   //  - 飼い主が水槽前にいる (isHighlighted)
-  // それ以外は「奥(小)グループ」。
+  // それ以外は「奥(小)グループ」。起動時の既存魚のドロップイン (startupEntry) は通常サイズ・通常レイヤー。
   isBig() {
-    return this.entering || this.dropIn || this.isHighlighted;
+    return this.dropIn || this.isHighlighted;
   }
 
   // いま目指す表示スケール
