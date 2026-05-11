@@ -134,13 +134,15 @@ function draw() {
   // 4) 気泡を更新＆描画
   _updateAndDrawBubbles();
 
-  // 5) 魚を更新＆描画 (うおちゃん本体 + ゲスト魚たち)
+  // 5) 魚を更新 → 描画。レイヤー (奥→手前):
+  //      奥  : 飼い主不在 / 未登録の小さいゲスト魚
+  //      中  : 飼い主在席 / 今日新しく入った大きいゲスト魚
+  //      手前: うおちゃん本体
   mainFish.update();
-  mainFish.draw();
-  for (const g of guestFishes) {
-    g.update();
-    g.draw();
-  }
+  for (const g of guestFishes) g.update();
+  for (const g of guestFishes) { if (!g.isBig()) g.draw(); }   // 奥
+  for (const g of guestFishes) { if (g.isBig()) g.draw(); }    // 中
+  mainFish.draw();                                              // 手前
 
   // 6) 手前側の水草（魚より前に描いてパララックス感を出す）
   _drawPlants(false);
@@ -341,10 +343,20 @@ window.aquarium = {
     loadImage(
       imageUrl,
       (img) => {
-        const fish = new GuestFish(img, options);
+        // _soundReady が立っている = 起動直後の初期同期ではなく「いま新しく登録された魚」。
+        // 新規登録のときだけ「上からドボン」のドロップイン + 着水時に効果音。
+        // 初期同期(_soundReady=false の間)はドロップなし・音なしでその場に出現 (従来通り)。
+        const isNewArrival = _soundReady;
+        const fish = new GuestFish(img, {
+          ...options,
+          dropIn: isNewArrival,
+          onSplash: isNewArrival ? () => _playGuestFishEnterSound() : null,
+        });
         guestFishes.push(fish);
-        console.log(`[aquarium] guest fish added: ${fish.id} (total ${guestFishes.length})`);
-        _playGuestFishEnterSound();
+        console.log(
+          `[aquarium] guest fish added: ${fish.id} (total ${guestFishes.length})` +
+          (isNewArrival ? ' [drop-in]' : '')
+        );
       },
       (err) => {
         console.warn(`[aquarium] failed to load guest fish image: ${imageUrl}`, err);
