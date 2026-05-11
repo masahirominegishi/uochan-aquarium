@@ -17,6 +17,10 @@
 //   - eye はランダム間隔で瞬き
 // =============================================================
 
+// うおちゃん本体: 'speak'(話している)ときは更にこの倍率まで滑らかに拡大する (前に出てきて話す感)
+const UOCHAN_SPEAK_SCALE_MUL = 1.5;
+const UOCHAN_SPEAK_LERP      = 0.15;  // speakScaleMul の補間係数 (~0.3s で到達)
+
 class Fish {
   constructor(parts, config) {
     this.parts  = parts;          // { imageName: p5.Image }
@@ -24,6 +28,7 @@ class Fish {
 
     // 表示スケール (canvas の何倍に縮小して画面に出すか)
     this.scale = (config.display_width || 280) / config.canvas_width;
+    this.speakScaleMul = 1.0;     // 'speak' のとき UOCHAN_SPEAK_SCALE_MUL へ滑らかに寄せる
 
     // 位置・速度
     this.x = width * 0.5;
@@ -70,6 +75,10 @@ class Fish {
     const swingMul = this._swingMultiplier();
     this.swingPhase += 0.18 * swingMul.speed;
 
+    // 'speak' 中は更に拡大 (急に大きくならないよう滑らかに寄せる)
+    const speakTarget = (this.state === 'speak') ? UOCHAN_SPEAK_SCALE_MUL : 1.0;
+    this.speakScaleMul += (speakTarget - this.speakScaleMul) * UOCHAN_SPEAK_LERP;
+
     // 横移動 (idle は平泳ぎ的にパルス: 腕の前→後 (引き動作) でピーク 3x、後→前 (戻し) でゆっくり)
     let velocityMul = 1.0;
     if (this.state === 'idle') {
@@ -87,7 +96,7 @@ class Fish {
       velocityMul = 2.2;        // 一気に去る
     }
     this.x += this.vx * velocityMul;
-    const halfW = this.config.canvas_width * this.scale * 0.5;
+    const halfW = this.config.canvas_width * this.scale * this.speakScaleMul * 0.5;
     if (this.x < halfW && this.vx < 0)               this.vx = Math.abs(this.vx);
     if (this.x > width - halfW && this.vx > 0)       this.vx = -Math.abs(this.vx);
 
@@ -143,7 +152,8 @@ class Fish {
 
     // 進行方向で水平反転 (元画像は左向きなので vx<=0 はそのまま)
     const flip = this.vx > 0 ? -1 : 1;
-    scale(flip * this.scale, this.scale);
+    const s = this.scale * this.speakScaleMul;   // 'speak' 中は拡大
+    scale(flip * s, s);
 
     // 800x800 キャンバスの中心を fish の位置に揃える
     translate(-this.config.canvas_width / 2, -this.config.canvas_height / 2);
@@ -252,7 +262,7 @@ class Fish {
 
 // チューニング用定数
 const GUEST_SIZE_SMALL   = 130;    // 飼い主不在 / 未登録のときの長辺 px
-const GUEST_SIZE_BIG     = 260;    // 飼い主在席 / 落下中のときの長辺 px
+const GUEST_SIZE_BIG     = 210;    // 飼い主在席 / 新規登録の落下中のときの長辺 px (旧 260 → ~0.8x)
 const GUEST_SIZE_LERP    = 0.12;   // 1 フレームのサイズ補間係数 (~0.4s で到達 @60fps)
 const GUEST_TILT_MAX_DEG = 15;     // 進行方向への傾き上限 (兼: 上下動の角度上限)
 const GUEST_TILT_LERP    = 0.12;   // 傾きの補間係数

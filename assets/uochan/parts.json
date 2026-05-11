@@ -2,7 +2,7 @@
   "canvas_width": 800,
   "canvas_height": 800,
   "facing": "left",
-  "display_width": 280,
+  "display_width": 364,
   "comment": "うおちゃんパーツ定義。pivot は 800x800 キャンバス内座標(画像左上原点)。z 値が小さいほど奥(先に描画)。",
   "parts": [
     { "name": "leg_r",   "z": 1, "image": "leg_r",        "pivot": [560, 300], "anim": "swing", "swing_amp_deg": 22, "swing_speed": 0.18, "phase": 0.0 },
