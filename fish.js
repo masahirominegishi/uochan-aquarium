@@ -1,62 +1,83 @@
 // =============================================================
-// Fish クラス: パーツ別 PNG をリギングして合成描画する
+// Fish クラス: 「うおちゃん本体」をパーツ別 PNG でリギングして合成描画する
 //
-// 旧方式 (1 枚画像を縦スライス変形) からパーツ方式に移行。
-// 各パーツは 800×800 透過 PNG。配置・回転中心・アニメ種別は
-// `assets/uochan/parts.json` で定義。
+// 2026-05-12 刷新: 初代うおちゃん (8パーツ・楕円スタブ → 手書きイラスト) を引退させ、
+//   2 種のイラストセットを切り替える方式に:
+//     swim = 泳ぐ魚 (横向き寝そべり、10パーツ)        … idle / approach / leave のとき
+//     talk = 話す魚 (斜め45°立ち、14パーツ + 目/口)   … speak (= AI 発話中) のとき
+//   定義は assets/uochan/rig.json。各 limb は 上腕/前腕 (or 腿/脛) の 2 セグメントを
+//   肩→肘 (腰→膝) で階層回転させる。poses.rest(=見本1) / p2(≈見本2) / p3(≈見本3) の
+//   3 キーポーズを pose_cycle に沿ってゆっくり三角波補間でループ。
+//   体は初代と同じく縦スライスの「しなり」、胸ビレはゆるくパタパタ。
+//   初代の見た目は assets/uochan_gen1/ に保存 (参照のみ、コードからは未使用)。
 //
-// アニメ種別:
-//   spine    : 縦スライス変形 (body 用、しなり泳ぎ)
-//   follow   : 親に追従するゆるい上下動 (head)
-//   swing    : pivot を中心に sin 波で回転 (arm, leg)
-//   frames   : 状態に応じてフレーム PNG を切替 (mouth, eye)
+// 座標/角度の約束 (rig.json と合わせる):
+//   - pivot / proximal / distal は各セットのキャンバス画素 (画像左上=原点)、rest ポーズ時点の位置
+//   - 角度は度。p5 の rotate() と同じく「正 = 時計回り (画面、y は下向き)」
 //
-// 状態:
-//   idle / approach / speak / leave
-//   - speak のとき mouth が closed/half/open/half ループ
-//   - eye はランダム間隔で瞬き
+// 状態 (ws-client.js から setState):
+//   idle / approach / speak / leave  ('speak' のとき talk セットへ即切り替え)
 // =============================================================
 
-// うおちゃん本体: 'speak'(話している)ときは更にこの倍率まで滑らかに拡大する (前に出てきて話す感)
-const UOCHAN_SPEAK_SCALE_MUL = 1.5;
-const UOCHAN_SPEAK_LERP      = 0.15;  // speakScaleMul の補間係数 (~0.3s で到達)
+// pose_cycle を 1 周するのにかける基準フレーム数 (30fps 前提。state ごとに speed で割る)
+const RIG_CYCLE_FRAMES = 132;
 
 class Fish {
-  constructor(parts, config) {
-    this.parts  = parts;          // { imageName: p5.Image }
-    this.config = config;         // parts.json の中身
+  // rig:    rig.json の中身 ({ swim:{...}, talk:{...} })
+  // images: { swim: { name -> p5.Image }, talk: { name -> p5.Image } }
+  constructor(rig, images) {
+    this.rig = rig;
 
-    // 表示スケール (canvas の何倍に縮小して画面に出すか)
-    this.scale = (config.display_width || 280) / config.canvas_width;
-    this.speakScaleMul = 1.0;     // 'speak' のとき UOCHAN_SPEAK_SCALE_MUL へ滑らかに寄せる
+    // セットごとに描画用の前計算 (display スケール / キャンバス中心 / レイヤー一覧 / pose_cycle の区切り境界)
+    this.sets = {};
+    for (const key of ['swim', 'talk']) {
+      const cfg = rig[key];
+      const scale = cfg.display_width
+        ? cfg.display_width / cfg.canvas_width
+        : cfg.display_height / cfg.canvas_height;
+      const anchor = cfg.anchor || [cfg.canvas_width / 2, cfg.canvas_height / 2];
+      // pose_cycle の各区切りの相対長 (cycle_weights、未指定なら全部 1) → 累積境界 [0, …, 1]
+      const keys = cfg.pose_cycle || ['rest'];
+      const w = (cfg.cycle_weights && cfg.cycle_weights.length === keys.length) ? cfg.cycle_weights : keys.map(() => 1);
+      const total = w.reduce((a, b) => a + b, 0) || 1;
+      const breaks = [0];
+      for (const wi of w) breaks.push(breaks[breaks.length - 1] + wi / total);
+      breaks[breaks.length - 1] = 1;
+      this.sets[key] = { cfg, imgs: images[key], scale, anchor, breaks };
+    }
+    // swim のキック (p2→p3 の区切りの頭) の cyclePhase — velocity surge の基準
+    {
+      const keys = rig.swim.pose_cycle, bk = this.sets.swim.breaks;
+      const i = keys.indexOf('p2');
+      this.swimKickPhase = (i >= 0) ? bk[i] : 1 / 6;
+    }
 
-    // 位置・速度
-    this.x = width * 0.5;
-    this.y = height * 0.5;
+    // 位置・速度 (画面座標)
+    this.x  = width * 0.5;
+    this.y  = height * 0.5;
     this.vx = -0.6;
     this.vy = 0;
-
-    // アニメ位相
-    this.tailPhase = 0;
-    this.bobPhase  = random(TWO_PI);
-    this.swingPhase = 0;          // 手足の共通位相 (state ごとに進む速度を変える)
 
     // 状態
     this.state = 'idle';
     this.stateChangedAt = millis();
     this.speakStartedAt = 0;
 
-    // 瞬き
-    this.lastBlinkAt = millis();
-    this.nextBlinkInterval = this._randomBlinkInterval();
-    this.blinkProgress = -1;  // -1 = 開いてる, 0..1 = 瞬き中
+    // talk への寄り具合 0..1 (0 = swim だけ / 1 = talk だけ / 中間 = クロスフェード)
+    this.talkMix = 0;
 
-    // パーツを z 順にソート (1 回だけ)
-    this.sortedParts = [...config.parts].sort((a, b) => a.z - b.z);
+    // アニメ位相
+    this.tailPhase  = 0;            // しなり
+    this.cyclePhase = 0;            // pose_cycle (0..1 で 1 周)
+    this.finPhase   = random(TWO_PI);
+    this.bobPhase   = random(TWO_PI);
+
+    // 瞬き (talk)
+    this.lastBlinkAt = millis();
+    this.nextBlinkInterval = random(3.0, 7.0);
+    this.blinkProgress = -1;        // -1 = 開、0..1 = 瞬き中
   }
 
-  // -----------------------------------------------------------
-  // 状態切替 (ws-client.js から呼ばれる)
   // -----------------------------------------------------------
   setState(newState) {
     if (this.state === newState) return;
@@ -66,183 +87,248 @@ class Fish {
     console.log(`[Fish] state -> ${newState}`);
   }
 
-  // -----------------------------------------------------------
-  // フレーム更新
-  // -----------------------------------------------------------
-  update() {
-    this.tailPhase += this._waveSpeed();
-    this.bobPhase  += 0.02;
-    const swingMul = this._swingMultiplier();
-    this.swingPhase += 0.18 * swingMul.speed;
+  // 現在「主に見えている」セット名 (壁判定などに使う)
+  _dominantSet() { return this.talkMix >= 0.5 ? 'talk' : 'swim'; }
 
-    // 'speak' 中は更に拡大 (急に大きくならないよう滑らかに寄せる)
-    const speakTarget = (this.state === 'speak') ? UOCHAN_SPEAK_SCALE_MUL : 1.0;
-    this.speakScaleMul += (speakTarget - this.speakScaleMul) * UOCHAN_SPEAK_LERP;
-
-    // 横移動 (idle は平泳ぎ的にパルス: 腕の前→後 (引き動作) でピーク 3x、後→前 (戻し) でゆっくり)
-    let velocityMul = 1.0;
-    if (this.state === 'idle') {
-      // arm_l: 下伸び phase=0 / arm_r: 上伸び phase=π にしてあるので
-      // sin(swingPhase) = +1 のとき両腕が前 (画面左) を指す。
-      // d(angle)/dt = cos(swingPhase): c < 0 のとき腕は前→後ろへ動く (推進) / c > 0 で戻し
-      const c = cos(this.swingPhase);
-      // c=-1 (推進ピーク): 3.0 倍 / c=+1 (戻しピーク): 0.15 倍 / c=0 (中間): ~1.5
-      velocityMul = 1.575 - c * 1.425;
-    } else if (this.state === 'speak') {
-      velocityMul = 0.1;        // ほぼ停止して話す
-    } else if (this.state === 'approach') {
-      velocityMul = 1.6;
-    } else if (this.state === 'leave') {
-      velocityMul = 2.2;        // 一気に去る
+  // state ごとのアニメ速さ
+  _speed() {
+    switch (this.state) {
+      case 'approach': return { cycle: 1.6, wave: 1.7 };
+      case 'speak':    return { cycle: 0.95, wave: 0.7 };
+      case 'leave':    return { cycle: 1.8, wave: 1.9 };
+      default:         return { cycle: 1.4, wave: 1.6 };  // idle: 手足の動きを速め
     }
-    this.x += this.vx * velocityMul;
-    const halfW = this.config.canvas_width * this.scale * this.speakScaleMul * 0.5;
-    if (this.x < halfW && this.vx < 0)               this.vx = Math.abs(this.vx);
-    if (this.x > width - halfW && this.vx > 0)       this.vx = -Math.abs(this.vx);
+  }
 
-    // 縦のゆらぎ (leave は深く沈むような上下動を強調)
-    const bobAmp = (this.state === 'leave') ? 1.6 : 0.5;
-    this.y += sin(this.bobPhase) * bobAmp;
-
-    // 瞬き判定
-    const now = millis();
-    if (this.blinkProgress < 0 && (now - this.lastBlinkAt) / 1000 > this.nextBlinkInterval) {
-      this.blinkProgress = 0;
-    }
-    if (this.blinkProgress >= 0) {
-      this.blinkProgress += 1 / 18;  // 約 0.3 秒で瞬き完了 (60fps 換算)
-      if (this.blinkProgress > 1) {
-        this.blinkProgress = -1;
-        this.lastBlinkAt = now;
-        this.nextBlinkInterval = this._randomBlinkInterval();
+  // state ごとの横移動倍率
+  // idle: 平泳ぎ風 — キックの瞬間 (cyclePhase≈0.5、p2→p3 の snap) に ぐいっと加速 →
+  //       指数減衰で 見本1/見本2 のあたりはほぼ停止 → 次のキックでまた すいーっと進む
+  _velocityMul() {
+    switch (this.state) {
+      case 'speak':    return 0.08;                       // ほぼ停止して話す
+      case 'approach': return 1.6;
+      case 'leave':    return 2.2;
+      default: {
+        // キックは p2→p3 の区切りの頭 (cyclePhase = this.swimKickPhase)。
+        // 蹴った瞬間に大げさに前進 → 最初は速く・急に失速 → 見本3 保持の途中で停止 →
+        // 腕の戻し (p3→p4 肘たたみ → p4→rest 伸ばし) と 手を伸ばしてる短い時間 はほぼ停止 → 次のキックでまた
+        const sinceKick = ((this.cyclePhase - this.swimKickPhase) % 1 + 1) % 1; // 0 = 蹴った直後
+        const t = Math.max(0, 1 - sinceKick / 0.5);
+        return 0.05 + 48 * Math.pow(t, 2.6);
       }
     }
   }
 
-  _waveSpeed() {
-    switch (this.state) {
-      case 'approach': return 0.30;
-      case 'speak':    return 0.10;
-      case 'leave':    return 0.34;
-      default:         return 0.16;  // idle: ゆったりしなり
-    }
-  }
+  // -----------------------------------------------------------
+  // フレーム更新 (canvas は frameRate(30) 固定なのでフレーム基準でOK)
+  // -----------------------------------------------------------
+  update() {
+    const sp = this._speed();
 
-  // state ごとの手足スイングの増幅とスピード
-  _swingMultiplier() {
-    switch (this.state) {
-      case 'approach': return { amp: 1.1, speed: 1.5 };
-      case 'speak':    return { amp: 0.4, speed: 0.4 };
-      case 'leave':    return { amp: 1.4, speed: 1.7 };
-      case 'idle':
-      default:         return { amp: 1.7, speed: 0.7 };  // 大きくゆっくり
-    }
-  }
+    // swim ⇄ talk はパッと切り替え (フェードなし)
+    this.talkMix = (this.state === 'speak') ? 1 : 0;
 
-  _randomBlinkInterval() {
-    return random(3.0, 7.0);
+    // 位相を進める
+    this.cyclePhase = (this.cyclePhase + (sp.cycle / RIG_CYCLE_FRAMES)) % 1;
+    const swimWaveSpeed = this.rig.swim.spine.wave_speed;   // しなりの基準速度 (swim 側を採用)
+    this.tailPhase += swimWaveSpeed * sp.wave;
+    this.finPhase  += 0.11;
+    this.bobPhase  += 0.02;
+
+    // 横移動
+    this.x += this.vx * this._velocityMul();
+    const dom = this.sets[this._dominantSet()];
+    const halfW = dom.cfg.canvas_width * dom.scale * 0.5;
+    if (this.x < halfW && this.vx < 0)             this.vx = Math.abs(this.vx);
+    if (this.x > width - halfW && this.vx > 0)     this.vx = -Math.abs(this.vx);
+
+    // 縦のゆらぎ (leave は強調)
+    const bobAmp = (this.state === 'leave') ? 1.6 : 0.5;
+    this.y += sin(this.bobPhase) * bobAmp;
+
+    // 瞬き (talk が見えているときだけ進める)
+    if (this.talkMix > 0.05) {
+      const now = millis();
+      if (this.blinkProgress < 0 && (now - this.lastBlinkAt) / 1000 > this.nextBlinkInterval) {
+        this.blinkProgress = 0;
+      }
+      if (this.blinkProgress >= 0) {
+        this.blinkProgress += 1 / Math.max(1, Math.round(this.rig.talk.blink.dur_ms / 33.3));
+        if (this.blinkProgress > 1) {
+          this.blinkProgress = -1;
+          this.lastBlinkAt = now;
+          this.nextBlinkInterval = random(this.rig.talk.blink.interval_min, this.rig.talk.blink.interval_max);
+        }
+      }
+    }
   }
 
   // -----------------------------------------------------------
   // 描画
   // -----------------------------------------------------------
   draw() {
+    // 話し中(speak)= talk セット / それ以外 = swim セット。即切り替え。
+    this._drawSet(this.talkMix >= 0.5 ? 'talk' : 'swim');
+  }
+
+  _drawSet(key) {
+    const set = this.sets[key];
+    const cfg = set.cfg;
     push();
     translate(this.x, this.y);
+    const flip = this.vx > 0 ? -1 : 1;       // 元画像は左向き。右へ泳ぐときだけ反転
+    scale(flip * set.scale, set.scale);
+    translate(-set.anchor[0], -set.anchor[1]);
 
-    // 進行方向で水平反転 (元画像は左向きなので vx<=0 はそのまま)
-    const flip = this.vx > 0 ? -1 : 1;
-    const s = this.scale * this.speakScaleMul;   // 'speak' 中は拡大
-    scale(flip * s, s);
+    // pose_cycle 上の現在位置 (limb ごとに phase をずらす)
+    const cycleKeys = cfg.pose_cycle;
+    for (const layer of cfg.layers) this._drawLayer(set, layer, cycleKeys);
 
-    // 800x800 キャンバスの中心を fish の位置に揃える
-    translate(-this.config.canvas_width / 2, -this.config.canvas_height / 2);
-
-    // z 順にパーツ描画
-    for (const part of this.sortedParts) {
-      this._drawPart(part);
-    }
+    noTint();
     pop();
   }
 
-  _drawPart(part) {
-    switch (part.anim) {
-      case 'spine':  this._drawSpine(part); break;
-      case 'follow': this._drawFollow(part); break;
-      case 'swing':  this._drawSwing(part); break;
-      case 'frames': this._drawFrames(part); break;
-      default:       this._drawStatic(part); break;
+  // local (0..1) が pose_cycle のどの区切りに入るか + その区切り内の進み具合 f (0..1) を返す
+  _segAt(set, local) {
+    const bk = set.breaks, n = bk.length - 1;
+    let seg = n - 1;
+    for (let i = 0; i < n; i++) { if (local < bk[i + 1]) { seg = i; break; } }
+    const lo = bk[seg], hi = bk[seg + 1];
+    const f = (hi > lo) ? Math.max(0, Math.min(1, (local - lo) / (hi - lo))) : 0;
+    return [seg, f];
+  }
+
+  // --- 1 レイヤーを描く ---
+  _drawLayer(set, layer, cycleKeys) {
+    const cfg = set.cfg, imgs = set.imgs;
+    switch (layer.type) {
+      case 'spine':  this._drawSpine(set); break;
+      case 'static': this._drawStatic(set, layer); break;
+      case 'eye':    this._drawEye(set); break;
+      case 'mouth':  this._drawMouth(set); break;
+      case 'limb':   this._drawLimb(set, layer, cycleKeys); break;
+      default: break;
     }
   }
 
-  _drawStatic(part) {
-    const img = this.parts[part.image];
-    if (img) image(img, 0, 0);
-  }
-
-  // body 用: 縦スライスを sin 波でずらして「しなり」を作る
-  _drawSpine(part) {
-    const img = this.parts[part.image];
+  // body: 縦スライスを sin 波でずらしてしならせる (初代と同じ式)
+  _drawSpine(set) {
+    const sp = set.cfg.spine;
+    const img = set.imgs[sp.image];
     if (!img) return;
-    const strips = 22;
-    const sStripW = img.width / strips;
+    const strips = sp.strips, span = sp.wave_span ?? 1.6;
+    const sw0 = img.width / strips;
     for (let i = 0; i < strips; i++) {
       const t = i / (strips - 1);
-      const amp = lerp(part.wave_amp_head ?? 1, part.wave_amp_tail ?? 16, t);
-      const yOff = sin(this.tailPhase + t * PI * 1.6) * amp;
-      const sx = i * sStripW;
-      const sw = sStripW + 1;
+      const amp = lerp(sp.wave_amp_head ?? 1, sp.wave_amp_tail ?? 16, t);
+      const yOff = sin(this.tailPhase + t * PI * span) * amp;
+      const sx = i * sw0;
+      const sw = sw0 + 1;
       image(img, sx, yOff, sw, img.height, sx, 0, sw, img.height);
     }
   }
 
-  // head 用: 体の bob にうっすら追従する控えめな上下動
-  _drawFollow(part) {
-    const img = this.parts[part.image];
-    if (!img) return;
-    const amp = part.follow_amp ?? 4;
-    const yOff = sin(this.bobPhase) * amp;
-    image(img, 0, yOff);
+  // body のしなりが、与えた x にいる地点に作る縦オフセット (limb を体に貼り付けるのに使う)
+  _waveYAt(set, x) {
+    const sp = set.cfg.spine;
+    const img = set.imgs[sp.image];
+    if (!img) return 0;
+    const strips = sp.strips, span = sp.wave_span ?? 1.6;
+    let i = Math.floor(x / (img.width / strips));
+    i = Math.max(0, Math.min(strips - 1, i));
+    const t = i / (strips - 1);
+    const amp = lerp(sp.wave_amp_head ?? 1, sp.wave_amp_tail ?? 16, t);
+    return sin(this.tailPhase + t * PI * span) * amp;
   }
 
-  // 手足用: pivot 中心に sin 波で回転 (state ごとに amp が変わる)
-  _drawSwing(part) {
-    const img = this.parts[part.image];
+  _drawStatic(set, layer) {
+    const img = set.imgs[layer.image];
     if (!img) return;
-    const baseAmpDeg = part.swing_amp_deg ?? 20;
-    const phase = part.phase ?? 0;
-    const mul = this._swingMultiplier();
-    const angle = sin(this.swingPhase + phase) * (baseAmpDeg * mul.amp * PI / 180);
+    if (layer.anim === 'flap' && layer.pivot) {
+      const wy = this._waveYAt(set, layer.pivot[0]);
+      const ang = sin(this.finPhase) * (layer.amp_deg ?? 6) * PI / 180;
+      push();
+      translate(0, wy);
+      translate(layer.pivot[0], layer.pivot[1]);
+      rotate(ang);
+      translate(-layer.pivot[0], -layer.pivot[1]);
+      image(img, 0, 0);
+      pop();
+    } else {
+      image(img, 0, 0);
+    }
+  }
+
+  _drawEye(set) {
+    const b = set.cfg.blink;
+    let key = b.open;
+    if (this.blinkProgress >= 0) {
+      const p = this.blinkProgress;
+      if (p >= 0.25 && p <= 0.75) key = b.closed;   // 中盤だけ閉じる
+    }
+    const img = set.imgs[key];
+    if (img) image(img, 0, 0);
+  }
+
+  _drawMouth(set) {
+    const m = set.cfg.mouth;
+    let key = m.closed;
+    if (this.state === 'speak') {
+      const elapsed = millis() - this.speakStartedAt;
+      const step = m.speak_step_ms ?? 130;
+      key = (Math.floor(elapsed / step) % 2 === 0) ? m.closed : m.open;
+    }
+    const img = set.imgs[key];
+    if (img) image(img, 0, 0);
+  }
+
+  // limb: 上腕/前腕 (腿/脛) の 2 ボーン階層回転
+  _drawLimb(set, layer, cycleKeys) {
+    const imgs = set.imgs;
+    const up = imgs[layer.upper], lo = imgs[layer.lower];
+    if (!up || !lo) return;
+
+    // この limb の pose 角 [upperDeg, lowerDeg] を pose_cycle から求める (区切り長は set.breaks に従う)
+    const ampMul = layer.amp_mul ?? 1;
+    const local = ((this.cyclePhase + (layer.phase ?? 0)) % 1 + 1) % 1;
+    const n = cycleKeys.length;
+    let [seg, f] = this._segAt(set, local);
+    if ((set.cfg.snap_from || []).includes(cycleKeys[seg])) {
+      f = 1;                        // この区切りは『間を飛ばして一気に』— 区切りの頭で次ポーズへスナップ
+    } else {
+      f = f * f * (3 - 2 * f);      // smoothstep
+    }
+    const a = set.cfg.poses[cycleKeys[seg]][layer.name];
+    const b = set.cfg.poses[cycleKeys[(seg + 1) % n]][layer.name];
+    const uDeg = lerp(a[0], b[0], f) * ampMul;
+    const lDeg = lerp(a[1], b[1], f) * ampMul;
+    const uRad = uDeg * PI / 180, lRad = lDeg * PI / 180;
+
+    const P = layer.proximal, D = layer.distal;
+    const wy = (layer.anchor) ? this._waveYAt(set, P[0]) : 0;
+    const off = layer.offset || [0, 0];           // limb 全体の平行移動 (付け根を fin の下に隠す等)
+    const lowerOff = layer.lower_offset || [0, 0];// 下セグメント (脛+靴) だけの追加平行移動
+    const lowerUnder = !!layer.lower_under;       // 脛+靴 を腿の下(裏)に描く (脚はこれ)
+    const lowerFlipV = !!layer.lower_flip_v;      // 脛+靴 を distal 中心に天地反転して描く
 
     push();
-    translate(part.pivot[0], part.pivot[1]);
-    rotate(angle);
-    translate(-part.pivot[0], -part.pivot[1]);
-    image(img, 0, 0);
+    translate(off[0], off[1] + wy);
+    // 上腕 (腿) を proximal 中心に uRad 回転 — このフレーム内に上下両セグメントを描く
+    translate(P[0], P[1]); rotate(uRad); translate(-P[0], -P[1]);
+    // 前腕+手 (脛+靴): 上腕の回転フレーム内で distal 中心に lRad 回転
+    if (lowerUnder) this._drawLimbLower(lo, D, lRad, lowerFlipV, lowerOff);
+    image(up, 0, 0);
+    if (!lowerUnder) this._drawLimbLower(lo, D, lRad, lowerFlipV, lowerOff);
     pop();
   }
 
-  // mouth/eye 用: 状態に応じてフレーム PNG を選択
-  _drawFrames(part) {
-    let frameKey = part.default;
-
-    if (part.name === 'mouth' && this.state === 'speak') {
-      const elapsed = millis() - this.speakStartedAt;
-      const stepMs  = part.speak_step_ms ?? 150;
-      const cycle   = part.speak_cycle ?? [part.default];
-      frameKey = cycle[Math.floor(elapsed / stepMs) % cycle.length];
-    }
-
-    if (part.name === 'eye' && this.blinkProgress >= 0) {
-      const p = this.blinkProgress;
-      if (p < 0.35)      frameKey = 'half';
-      else if (p < 0.65) frameKey = 'closed';
-      else               frameKey = 'half';
-    }
-
-    const imgName = (part.frames && part.frames[frameKey]) || part.image;
-    const img = this.parts[imgName];
-    if (img) image(img, 0, 0);
+  _drawLimbLower(img, D, lRad, flipV, lowerOff) {
+    push();
+    translate(lowerOff[0], lowerOff[1]);                                   // 下セグメントだけの平行移動
+    translate(D[0], D[1]); rotate(lRad); translate(-D[0], -D[1]);
+    if (flipV) { translate(0, D[1]); scale(1, -1); translate(0, -D[1]); }  // distal の y を軸に天地反転
+    image(img, 0, 0);
+    pop();
   }
 }
 

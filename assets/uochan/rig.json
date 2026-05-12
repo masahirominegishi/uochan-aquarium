@@ -1,0 +1,74 @@
+{
+  "comment": [
+    "うおちゃん リグ定義 v2 (2026-05-12)。初代 (uochan_gen1) からパーツ別 PNG に刷新。",
+    "swim = 泳ぐ魚 (横向き寝そべり、10パーツ) / talk = 話す魚 (斜め45°立ち、14パーツ + 目/口フレーム)。",
+    "座標は各セットのキャンバス画素 (画像左上=原点)。pivot/joint は『rest ポーズ (= 見本1, 全関節 0deg)』時点の位置。",
+    "角度は度 (deg)。p5 の rotate() と同じく『正 = 時計回り (画面上、y は下向き)』。",
+    "limb は 2 セグメントの階層回転: rotate(upper_deg @ proximal) してから rotate(lower_deg @ distal) (distal の座標は rest 値、upper の回転フレーム内で適用)。",
+    "lower_deg は『肘/膝の曲げ』= 上腕/腿に対する相対角。lower_under:true で lower (脛+靴) を upper (腿) の下=裏に描く (脚はこれ)。",
+    "poses: rest(=見本1, 全 0) / p2(≈見本2) / p3(≈見本3)。pose_cycle のキー列をゆっくり三角波補間でループ。",
+    "layers の並び順 = 描画順 (先頭が奥)。見本に合わせて『奥側の手・足はボディの裏』『手前側の手・足はボディの表』に挟む配置:",
+    "  swim: arm_r(奥) leg_r(奥) → body → leg_l(手前) arm_l(手前) → fin(最上位)。 talk: arm_r(奥) leg_l(奥) → body → eye mouth leg_r(手前) arm_l(手前) → fin(最上位)。",
+    "arm_l (手前の腕) の proximal は胸びれ(fin)の付け根あたり (fin の付け根 ≈ swim(661,557) / talk(660,~625)) に置いて、腕の付け根が fin の下に隠れるように。"
+  ],
+
+  "swim": {
+    "asset_dir": "uochan_swim",
+    "canvas_width": 1780,
+    "canvas_height": 881,
+    "facing": "left",
+    "display_width": 460,
+    "spine": { "image": "body", "strips": 22, "wave_amp_head": 2, "wave_amp_tail": 22, "wave_speed": 0.16, "wave_span": 1.6 },
+    "layers": [
+      { "type": "limb", "name": "arm_r", "upper": "arm_r", "lower": "arm_r_hand",
+        "proximal": [610, 535], "distal": [412, 544], "anchor": "body", "phase": 0.02 },
+      { "type": "limb", "name": "leg_r", "upper": "leg_r", "lower": "leg_r_shin", "lower_under": true, "lower_flip_v": true,
+        "proximal": [1162, 369], "distal": [1340, 513], "offset": [0, 90], "anchor": "body", "phase": 0.02 },
+      { "type": "spine", "name": "body" },
+      { "type": "limb", "name": "leg_l", "upper": "leg_l", "lower": "leg_l_shin", "lower_under": true,
+        "proximal": [1141, 591], "distal": [1335, 751], "anchor": "body", "phase": 0.00 },
+      { "type": "limb", "name": "arm_l", "upper": "arm_l", "lower": "arm_l_hand",
+        "proximal": [690, 558], "distal": [512, 661], "offset": [0, -36], "anchor": "body", "phase": 0.00 },
+      { "type": "static", "name": "fin", "image": "fin", "anim": "flap", "pivot": [668, 420], "amp_deg": 7, "speed": 0.11 }
+    ],
+    "poses": {
+      "rest": { "arm_l": [0, 0],     "arm_r": [0, 0],     "leg_l": [0, 0],    "leg_r": [0, 0] },
+      "p2":   { "arm_l": [0, 0],     "arm_r": [0, 0],     "leg_l": [90, -95], "leg_r": [90, -95] },
+      "p3":   { "arm_l": [-145, -8], "arm_r": [-145, -8], "leg_l": [-12, 6],  "leg_r": [-12, 6] },
+      "p4":   { "arm_l": [-85, 100], "arm_r": [-85, 100], "leg_l": [-12, 6],  "leg_r": [-12, 6] }
+    },
+    "pose_cycle": ["rest", "p2", "p3", "p3", "p3", "p4"],
+    "snap_from": ["p2", "p4"]
+  },
+
+  "talk": {
+    "asset_dir": "uochan_talk",
+    "canvas_width": 1764,
+    "canvas_height": 1594,
+    "facing": "left",
+    "display_height": 412,
+    "spine": { "image": "body", "strips": 22, "wave_amp_head": 1, "wave_amp_tail": 14, "wave_speed": 0.12, "wave_span": 1.6 },
+    "blink": { "open": "eye_open", "closed": "eye_closed", "interval_min": 3.0, "interval_max": 7.0, "dur_ms": 240 },
+    "mouth": { "closed": "mouth_closed", "open": "mouth_open", "speak_step_ms": 130 },
+    "layers": [
+      { "type": "limb", "name": "arm_r", "upper": "arm_r", "lower": "arm_r_hand",
+        "proximal": [544, 708], "distal": [392, 747], "anchor": "body", "phase": 0.10, "amp_mul": 0.9 },
+      { "type": "limb", "name": "leg_l", "upper": "leg_l", "lower": "leg_l_shin", "lower_under": true,
+        "proximal": [1084, 962], "distal": [1100, 1110], "anchor": "body", "phase": 0.50 },
+      { "type": "spine", "name": "body" },
+      { "type": "eye", "name": "eye" },
+      { "type": "mouth", "name": "mouth" },
+      { "type": "limb", "name": "leg_r", "upper": "leg_r", "lower": "leg_r_shin", "lower_under": true,
+        "proximal": [922, 924], "distal": [820, 1085], "anchor": "body", "phase": 0.00 },
+      { "type": "limb", "name": "arm_l", "upper": "arm_l", "lower": "arm_l_hand",
+        "proximal": [705, 796], "distal": [602, 898], "anchor": "body", "phase": 0.00 },
+      { "type": "static", "name": "fin", "image": "fin", "anim": "flap", "pivot": [660, 628], "amp_deg": 7, "speed": 0.10 }
+    ],
+    "poses": {
+      "rest": { "arm_l": [0, 0],    "arm_r": [0, 0],    "leg_l": [0, 0],    "leg_r": [0, 0] },
+      "p2":   { "arm_l": [9, 14],   "arm_r": [9, 14],   "leg_l": [17, 11],  "leg_r": [17, 11] },
+      "p3":   { "arm_l": [-7, -11], "arm_r": [-7, -11], "leg_l": [-15, -10], "leg_r": [-15, -10] }
+    },
+    "pose_cycle": ["rest", "p2", "p3", "p2"]
+  }
+}

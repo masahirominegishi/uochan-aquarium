@@ -19,8 +19,9 @@ let mainFish;        // うおちゃん本体 (Fish インスタンス)
 let guestFishes = [];// お客さんがアップロードした魚 (GuestFish インスタンスの配列)
 let bubbles = [];    // 気泡たち
 let plants  = [];    // 水草の位置情報
-let partsConfig;     // assets/uochan/parts.json
-let parts = {};      // { imageName: p5.Image } : 12 パーツの透過 PNG
+let rig;             // assets/uochan/rig.json (swim / talk 2セットのリグ定義)
+let swimImgs = {};   // { name -> p5.Image } : 泳ぐ魚 10パーツ
+let talkImgs = {};   // { name -> p5.Image } : 話す魚 14パーツ
 
 // ゲスト魚が水槽に入るときの効果音 (drop → into を続けて鳴らす)。
 // p5.sound は使わず素の HTMLAudioElement で再生する (preload をブロックしない / ライブラリ不要)。
@@ -38,22 +39,26 @@ let _startupQueue       = [];     // [{ imageUrl, options }]
 let _lastStartupSpawnAt = -_STARTUP_SPAWN_INTERVAL_MS;  // 最初の 1 匹はすぐ出す
 let _startupSpawnIdx    = 0;      // golden-ratio で x をばらけさせるためのカウンタ
 
-// うおちゃんの 12 パーツ。preload で全部読み込む。
-const UOCHAN_IMAGES = [
-  'body', 'head',
-  'mouth_closed', 'mouth_half', 'mouth_open',
-  'eye_open', 'eye_half', 'eye_closed',
-  'arm_l', 'arm_r', 'leg_l', 'leg_r',
+// うおちゃん本体のパーツ名 (preload で全部読み込む)。実体は assets/uochan_swim/ と assets/uochan_talk/。
+const SWIM_PART_NAMES = [
+  'body', 'fin',
+  'arm_l', 'arm_l_hand', 'arm_r', 'arm_r_hand',
+  'leg_l', 'leg_l_shin', 'leg_r', 'leg_r_shin',
+];
+const TALK_PART_NAMES = [
+  'body', 'fin',
+  'eye_open', 'eye_closed', 'mouth_open', 'mouth_closed',
+  'arm_l', 'arm_l_hand', 'arm_r', 'arm_r_hand',
+  'leg_l', 'leg_l_shin', 'leg_r', 'leg_r_shin',
 ];
 
 // =============================================================
 // preload : setup より前に呼ばれる。画像などのアセットをここで読む
 // =============================================================
 function preload() {
-  partsConfig = loadJSON('assets/uochan/parts.json');
-  for (const name of UOCHAN_IMAGES) {
-    parts[name] = loadImage(`assets/uochan/${name}.png`);
-  }
+  rig = loadJSON('assets/uochan/rig.json');
+  for (const name of SWIM_PART_NAMES) swimImgs[name] = loadImage(`assets/uochan_swim/${name}.png`);
+  for (const name of TALK_PART_NAMES) talkImgs[name] = loadImage(`assets/uochan_talk/${name}.png`);
 }
 
 // =============================================================
@@ -70,8 +75,8 @@ function setup() {
   // 楕円の中心を「左上」ではなく「中央」基準にする（魚の描画を素直に書きたいので）
   ellipseMode(CENTER);
 
-  // パーツリギングでうおちゃん本体を作成
-  mainFish = new Fish(parts, partsConfig);
+  // パーツリギングでうおちゃん本体を作成 (swim / talk 2セット)
+  mainFish = new Fish(rig, { swim: swimImgs, talk: talkImgs });
 
   // 気泡を初期配置（最初から画面に少しある状態にしたい）
   for (let i = 0; i < 12; i++) {
@@ -400,8 +405,8 @@ window.aquarium = {
     );
   },
 
-  // テスト用: うおちゃんの body 画像を流用してゲスト魚を 1 匹追加
+  // テスト用: うおちゃん泳ぐ魚の body 画像を流用してゲスト魚を 1 匹追加
   testAddGuest() {
-    this.addGuestFish('assets/uochan/body.png');
+    this.addGuestFish('assets/uochan_swim/body.png');
   },
 };
