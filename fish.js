@@ -97,7 +97,7 @@ class Fish {
       case 'approach': return { cycle: 1.6, wave: 1.7 };
       case 'speak':    return { cycle: 0.95, wave: 0.7 };
       case 'leave':    return { cycle: 1.8, wave: 1.9 };
-      default:         return { cycle: 1.4, wave: 1.6 };  // idle: commit 時の周回速度に戻す (脚タックだけ pose_cycle の区切り分割で速く)
+      default:         return { cycle: 1.67, wave: 1.6 };  // idle: 「両方伸びてる」区切り(p4→rest hold)をほぼ無くした分だけ全体も短縮 (他の区切りの実時間は据え置き)
     }
   }
 
