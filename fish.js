@@ -45,10 +45,11 @@ class Fish {
       breaks[breaks.length - 1] = 1;
       this.sets[key] = { cfg, imgs: images[key], scale, anchor, breaks };
     }
-    // swim のキック (p2→p3 の区切りの頭) の cyclePhase — velocity surge の基準
+    // swim のキック (p2→p3 への区切りの頭) の cyclePhase — velocity surge の基準
     {
-      const keys = rig.swim.pose_cycle, bk = this.sets.swim.breaks;
-      const i = keys.indexOf('p2');
+      const keys = rig.swim.pose_cycle, bk = this.sets.swim.breaks, n = keys.length;
+      let i = -1;
+      for (let k = 0; k < n; k++) { if (keys[k] === 'p2' && keys[(k + 1) % n] === 'p3') { i = k; break; } }
       this.swimKickPhase = (i >= 0) ? bk[i] : 1 / 6;
     }
 
@@ -96,7 +97,7 @@ class Fish {
       case 'approach': return { cycle: 1.6, wave: 1.7 };
       case 'speak':    return { cycle: 0.95, wave: 0.7 };
       case 'leave':    return { cycle: 1.8, wave: 1.9 };
-      default:         return { cycle: 1.4, wave: 1.6 };  // idle: 手足の動きを速め
+      default:         return { cycle: 1.4, wave: 1.6 };  // idle: commit 時の周回速度に戻す (脚タックだけ pose_cycle の区切り分割で速く)
     }
   }
 
