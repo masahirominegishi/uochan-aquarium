@@ -22,6 +22,24 @@
 // pose_cycle を 1 周するのにかける基準フレーム数 (30fps 前提。state ごとに speed で割る)
 const RIG_CYCLE_FRAMES = 132;
 
+// idle の「ひと休み」: 何回か泳ぐ → 手を後ろに伸ばした (p3 hold) ところで止まる → またしばらく泳ぐ
+const IDLE_REST_PHASE   = 0.5;    // 休憩に入る cyclePhase (= p3 hold ≒ 腕を後ろに伸ばしたあたり)
+const IDLE_REST_MIN_MS  = 1600;   // ひと休みの長さ (ms, 下限)
+const IDLE_REST_MAX_MS  = 4000;   // 〃 (上限)
+const IDLE_SWIMS_MIN    = 3;      // 次の休憩までに泳ぐ cycle 数 (下限, 含む)
+const IDLE_SWIMS_MAX    = 7;      // 〃 (上限, 含まない → 実際は 3〜6 周)
+
+// ひと休み中、手足がゆっくり下がってくる「だらーん」演出。各 limb の pose 角 [upper, lower] に
+// だらーん係数 (0→1, 休憩中はじわっと増・動き出すとじわっと戻る) ぶん足す (正 = 下がる方向)。
+const REST_DROOP_RAMP_FRAMES    = 42;   // 休憩中: この frame 数かけて係数 0→1 (~1.4s @30fps)
+const REST_DROOP_RECOVER_FRAMES = 16;   // 動き出し: この frame 数かけて係数 1→0 (~0.5s)
+const REST_DROOP = {
+  arm_l: { u: 38, l: 24 },
+  arm_r: { u: 38, l: 24 },
+  leg_l: { u: 12, l: 8 },
+  leg_r: { u: 12, l: 8 }
+};
+
 class Fish {
   // rig:    rig.json の中身 ({ swim:{...}, talk:{...} })
   // images: { swim: { name -> p5.Image }, talk: { name -> p5.Image } }
@@ -73,6 +91,12 @@ class Fish {
     this.finPhase   = random(TWO_PI);
     this.bobPhase   = random(TWO_PI);
 
+    // idle のひと休み (上記 IDLE_REST_* を参照)
+    this.idleCyclesDone     = 0;                                      // 前回の休憩以降に終わった cycle 数
+    this.idleSwimsUntilRest = Math.floor(random(IDLE_SWIMS_MIN, IDLE_SWIMS_MAX)); // 次の休憩までに泳ぐ周数
+    this.idleRestUntil      = 0;                                      // > 0 = 休憩中で、この millis() まで停止
+    this.idleDroop          = 0;                                      // だらーん係数 0..1 (休憩中=増, 動き出し=減)
+
     // 瞬き (talk)
     this.lastBlinkAt = millis();
     this.nextBlinkInterval = random(3.0, 7.0);
@@ -85,6 +109,11 @@ class Fish {
     this.state = newState;
     this.stateChangedAt = millis();
     if (newState === 'speak') this.speakStartedAt = millis();
+    if (newState === 'idle') {                  // idle に入り直したらひと休みのカウントをリセット
+      this.idleCyclesDone = 0;
+      this.idleSwimsUntilRest = Math.floor(random(IDLE_SWIMS_MIN, IDLE_SWIMS_MAX));
+      this.idleRestUntil = 0;
+    }
     console.log(`[Fish] state -> ${newState}`);
   }
 
@@ -110,6 +139,7 @@ class Fish {
       case 'approach': return 1.6;
       case 'leave':    return 2.2;
       default: {
+        if (this.idleRestUntil > 0) return 0.04;            // ひと休み中はほぼ停止
         // キックは p2→p3 の区切りの頭 (cyclePhase = this.swimKickPhase)。
         // 蹴った瞬間に大げさに前進 → 最初は速く・急に失速 → 見本3 保持の途中で停止 →
         // 腕の戻し (p3→p4 肘たたみ → p4→rest 伸ばし) と 手を伸ばしてる短い時間 はほぼ停止 → 次のキックでまた
@@ -129,8 +159,32 @@ class Fish {
     // swim ⇄ talk はパッと切り替え (フェードなし)
     this.talkMix = (this.state === 'speak') ? 1 : 0;
 
-    // 位相を進める
-    this.cyclePhase = (this.cyclePhase + (sp.cycle / RIG_CYCLE_FRAMES)) % 1;
+    // 位相を進める (idle は「ひと休み」中だけ pose_cycle を据え置き = 腕を後ろに伸ばしたまま停止)
+    if (this.state === 'idle' && this.idleRestUntil > 0) {
+      if (millis() >= this.idleRestUntil) {                 // ひと休みおわり → 再開 (次の休憩までの周数を引き直す)
+        this.idleRestUntil = 0;
+        this.idleCyclesDone = 0;
+        this.idleSwimsUntilRest = Math.floor(random(IDLE_SWIMS_MIN, IDLE_SWIMS_MAX));
+      }
+      // 休憩中は cyclePhase を進めない (tailPhase 等は下で通常どおり進めるので体はゆらゆら漂う)
+    } else {
+      const prevPhase = this.cyclePhase;
+      this.cyclePhase = (this.cyclePhase + (sp.cycle / RIG_CYCLE_FRAMES)) % 1;
+      if (this.state === 'idle') {
+        if (this.cyclePhase < prevPhase) this.idleCyclesDone++;       // pose_cycle を 1 周した
+        // そろそろ疲れた & 腕を後ろに伸ばした (p3 hold) ところに来た → ひと休み開始
+        if (this.idleCyclesDone >= this.idleSwimsUntilRest
+            && prevPhase < IDLE_REST_PHASE && this.cyclePhase >= IDLE_REST_PHASE) {
+          this.cyclePhase   = IDLE_REST_PHASE;
+          this.idleRestUntil = millis() + random(IDLE_REST_MIN_MS, IDLE_REST_MAX_MS);
+        }
+      }
+    }
+    // だらーん係数: ひと休み中はじわっと増 → 動き出したらじわっと戻る
+    const droopUp = (this.state === 'idle' && this.idleRestUntil > 0);
+    this.idleDroop = Math.max(0, Math.min(1,
+      this.idleDroop + (droopUp ? 1 / REST_DROOP_RAMP_FRAMES : -1 / REST_DROOP_RECOVER_FRAMES)));
+
     const swimWaveSpeed = this.rig.swim.spine.wave_speed;   // しなりの基準速度 (swim 側を採用)
     this.tailPhase += swimWaveSpeed * sp.wave;
     this.finPhase  += 0.11;
@@ -301,8 +355,13 @@ class Fish {
     }
     const a = set.cfg.poses[cycleKeys[seg]][layer.name];
     const b = set.cfg.poses[cycleKeys[(seg + 1) % n]][layer.name];
-    const uDeg = lerp(a[0], b[0], f) * ampMul;
-    const lDeg = lerp(a[1], b[1], f) * ampMul;
+    let uDeg = lerp(a[0], b[0], f) * ampMul;
+    let lDeg = lerp(a[1], b[1], f) * ampMul;
+    // ひと休み中 (idle・swim) は手足がゆっくり下がる「だらーん」
+    if (this.idleDroop > 0 && set === this.sets.swim) {
+      const d = REST_DROOP[layer.name];
+      if (d) { uDeg += d.u * this.idleDroop; lDeg += d.l * this.idleDroop; }
+    }
     const uRad = uDeg * PI / 180, lRad = lDeg * PI / 180;
 
     const P = layer.proximal, D = layer.distal;
