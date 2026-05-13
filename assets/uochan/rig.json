@@ -28,7 +28,7 @@
       { "type": "limb", "name": "leg_l", "upper": "leg_l", "lower": "leg_l_shin", "lower_under": true,
         "proximal": [1141, 591], "distal": [1335, 751], "anchor": "body", "phase": 0.00 },
       { "type": "limb", "name": "arm_l", "upper": "arm_l", "lower": "arm_l_hand",
-        "proximal": [690, 558], "distal": [512, 661], "offset": [0, -36], "anchor": "body", "phase": 0.00 },
+        "proximal": [710, 558], "distal": [512, 661], "offset": [0, -36], "anchor": "body", "phase": 0.00 },
       { "type": "static", "name": "fin", "image": "fin", "anim": "flap", "pivot": [668, 420], "amp_deg": 7, "speed": 0.11 }
     ],
     "poses": {
