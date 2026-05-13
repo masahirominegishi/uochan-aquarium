@@ -1,0 +1,131 @@
+{
+  "canvas": {
+    "w": 1920,
+    "h": 1080
+  },
+  "background": "bg_far.png",
+  "plants_back": [
+    {
+      "file": "plants_back_01_a.png",
+      "crop_x": 1445,
+      "crop_y": 726,
+      "crop_w": 271,
+      "crop_h": 161,
+      "anchor_x": 1580,
+      "anchor_y": 863,
+      "area": 13730
+    },
+    {
+      "file": "plants_back_01_b.png",
+      "crop_x": 291,
+      "crop_y": 764,
+      "crop_w": 205,
+      "crop_h": 143,
+      "anchor_x": 393,
+      "anchor_y": 883,
+      "area": 9192
+    },
+    {
+      "file": "plants_back_02.png",
+      "crop_x": 376,
+      "crop_y": 812,
+      "crop_w": 195,
+      "crop_h": 194,
+      "anchor_x": 473,
+      "anchor_y": 982,
+      "area": 12286
+    },
+    {
+      "file": "plants_back_03.png",
+      "crop_x": 1642,
+      "crop_y": 539,
+      "crop_w": 251,
+      "crop_h": 227,
+      "anchor_x": 1767,
+      "anchor_y": 742,
+      "area": 17315
+    },
+    {
+      "file": "plants_back_04.png",
+      "crop_x": 1246,
+      "crop_y": 876,
+      "crop_w": 180,
+      "crop_h": 153,
+      "anchor_x": 1336,
+      "anchor_y": 1005,
+      "area": 8919
+    },
+    {
+      "file": "plants_back_05.png",
+      "crop_x": 5,
+      "crop_y": 696,
+      "crop_w": 413,
+      "crop_h": 372,
+      "anchor_x": 211,
+      "anchor_y": 1044,
+      "area": 69110
+    },
+    {
+      "file": "plants_back_06_1.png",
+      "crop_x": 16,
+      "crop_y": 451,
+      "crop_w": 126,
+      "crop_h": 350,
+      "anchor_x": 79,
+      "anchor_y": 777,
+      "area": 13032
+    },
+    {
+      "file": "plants_back_06_2.png",
+      "crop_x": 60,
+      "crop_y": 471,
+      "crop_w": 202,
+      "crop_h": 332,
+      "anchor_x": 161,
+      "anchor_y": 779,
+      "area": 14958
+    },
+    {
+      "file": "plants_back_06_3.png",
+      "crop_x": 63,
+      "crop_y": 625,
+      "crop_w": 273,
+      "crop_h": 181,
+      "anchor_x": 199,
+      "anchor_y": 782,
+      "area": 9123
+    }
+  ],
+  "plants_front": [
+    {
+      "file": "plants_front_07_1.png",
+      "crop_x": 1766,
+      "crop_y": 602,
+      "crop_w": 154,
+      "crop_h": 472,
+      "anchor_x": 1845,
+      "anchor_y": 1050,
+      "area": 26010
+    },
+    {
+      "file": "plants_front_07_2.png",
+      "crop_x": 1598,
+      "crop_y": 630,
+      "crop_w": 264,
+      "crop_h": 446,
+      "anchor_x": 1730,
+      "anchor_y": 1052,
+      "area": 29621
+    },
+    {
+      "file": "plants_front_07_3.png",
+      "crop_x": 1494,
+      "crop_y": 847,
+      "crop_w": 364,
+      "crop_h": 233,
+      "anchor_x": 1676,
+      "anchor_y": 1058,
+      "area": 18201
+    }
+  ]
+}

@@ -18,10 +18,13 @@
 let mainFish;        // うおちゃん本体 (Fish インスタンス)
 let guestFishes = [];// お客さんがアップロードした魚 (GuestFish インスタンスの配列)
 let bubbles = [];    // 気泡たち
-let plants  = [];    // 水草の位置情報
+let plants  = [];    // 水草: scene.json から構築された描画用エントリ配列
 let rig;             // assets/uochan/rig.json (swim / talk 2セットのリグ定義)
 let swimImgs = {};   // { name -> p5.Image } : 泳ぐ魚 10パーツ
 let talkImgs = {};   // { name -> p5.Image } : 話す魚 14パーツ
+let scene;           // assets/scene/scene.json (背景・水草のレイアウト定義)
+let bgFarImg;        // 遠景: bg_far.png (水のグラデと水底)
+let sceneImgs = {};  // { filename -> p5.Image } : 切り抜いた水草パーツ
 
 // ゲスト魚が水槽に入るときの効果音 (drop → into を続けて鳴らす)。
 // p5.sound は使わず素の HTMLAudioElement で再生する (preload をブロックしない / ライブラリ不要)。
@@ -52,6 +55,28 @@ const TALK_PART_NAMES = [
   'leg_l', 'leg_l_shin', 'leg_r', 'leg_r_shin',
 ];
 
+// 水槽シーンの水草 PNG 一覧。scene.json は preload 時点ではまだ JSON として
+// 参照できる保証がないので (p5 の loadJSON は preload 内で並行ロード)、
+// 画像ロードはここに列挙した固定リストで行う。
+// 命名規則: plants_<layer>_<id>[_<part>].png。scene.json と一致させること。
+const SCENE_PLANT_FILES = [
+  'plants_back_01_a.png', 'plants_back_01_b.png',
+  'plants_back_02.png', 'plants_back_03.png', 'plants_back_04.png', 'plants_back_05.png',
+  'plants_back_06_1.png', 'plants_back_06_2.png', 'plants_back_06_3.png',
+  'plants_front_07_1.png', 'plants_front_07_2.png', 'plants_front_07_3.png',
+];
+
+// 株ごとの揺れ振幅 (ラジアン)。0 を返すと静止。
+// サンゴ系 (01 の塊 / 04 の小さな花) は回転すると不自然なので静止。
+// 05 の大きな青ファンも形がしっかりしているので静止。
+// 02 / 03 の黄緑のわかめ系と、06_ / 07_ の細長い葉だけ揺らす。
+function _plantSwayAmp(filename) {
+  if (/_0[23]\./.test(filename)) return 0.10;  // 黄緑わかめ: 短いが柔らかく見えるよう少し大きめ
+  if (/_06_/.test(filename))     return 0.08;  // 奥の細長い葉
+  if (/_07_/.test(filename))     return 0.12;  // 手前の細長い葉 (パララックスで強め)
+  return 0;                                     // それ以外 (サンゴ等) は静止
+}
+
 // =============================================================
 // preload : setup より前に呼ばれる。画像などのアセットをここで読む
 // =============================================================
@@ -59,6 +84,11 @@ function preload() {
   rig = loadJSON('assets/uochan/rig.json');
   for (const name of SWIM_PART_NAMES) swimImgs[name] = loadImage(`assets/uochan_swim/${name}.png`);
   for (const name of TALK_PART_NAMES) talkImgs[name] = loadImage(`assets/uochan_talk/${name}.png`);
+
+  // 水槽シーン (背景 + 水草)
+  scene    = loadJSON('assets/scene/scene.json');
+  bgFarImg = loadImage('assets/scene/bg_far.png');
+  for (const f of SCENE_PLANT_FILES) sceneImgs[f] = loadImage(`assets/scene/${f}`);
 }
 
 // =============================================================
@@ -83,23 +113,23 @@ function setup() {
     bubbles.push(_makeBubble(random(height)));
   }
 
-  // 水草の位置を決める（手前用と奥用を分けて、奥行きを出す）
-  for (let i = 0; i < 6; i++) {
-    plants.push({
-      x: random(width),
-      h: random(80, 200),       // 高さ
-      sway: random(TWO_PI),     // 揺れの初期位相
-      back: true,               // 奥側
-    });
-  }
-  for (let i = 0; i < 4; i++) {
-    plants.push({
-      x: random(width),
-      h: random(140, 260),
-      sway: random(TWO_PI),
-      back: false,              // 手前側（魚より前に描く）
-    });
-  }
+  // 水草を scene.json から構築。各エントリは PNG とアンカー (元 1920x1080 上の
+  // 根元位置) を持つ。描画時は anchor を画面サイズにスケールして配置する。
+  // sway フラグが立っているものは根元を軸に sin で微小回転する。
+  const _buildPlant = (entry, layer) => ({
+    img:      sceneImgs[entry.file],
+    layer:    layer,            // 'back' or 'front'
+    crop_x:   entry.crop_x,     // 元キャンバス上の切り抜き左上 x
+    crop_y:   entry.crop_y,     // 同 y
+    crop_w:   entry.crop_w,
+    crop_h:   entry.crop_h,
+    anchor_x: entry.anchor_x,   // 元キャンバス上の根元 x (株中央)
+    anchor_y: entry.anchor_y,   // 同 y (株下端)
+    swayAmp:  _plantSwayAmp(entry.file),  // 0 なら静止
+    phase:    random(TWO_PI),   // 揺れの初期位相 (株ごとにばらける)
+  });
+  for (const e of scene.plants_back)  plants.push(_buildPlant(e, 'back'));
+  for (const e of scene.plants_front) plants.push(_buildPlant(e, 'front'));
 
   // 効果音を読み込む (素の Audio。失敗しても水槽描画には影響しない)
   try {
@@ -180,20 +210,13 @@ function draw() {
 }
 
 // -------------------------------------------------------------
-// 背景：水のグラデーション
+// 背景：bg_far.png を画面いっぱいに描く
 // -------------------------------------------------------------
+// 1920x1080 で描かれた背景イラストを、現在の canvas サイズに 1 回ブリットする。
+// 旧実装 (手続きの縦グラデ) は createLinearGradient + fillRect の 1 コールで
+// 既に軽かったが、こちらも image() 1 コールなので CPU 的にトントン or 安い。
 function _drawWaterBackground() {
-  // 上：明るい水色 / 下：深い青。
-  // 旧実装は毎フレーム height 本の line() を描いていて重かった(1080行×60fps ≒ 65k 呼び/秒)。
-  // canvas2d ネイティブの linearGradient で 1 回の fillRect に置き換え (ほぼ無コスト)。
-  const ctx = drawingContext;
-  ctx.save();
-  const g = ctx.createLinearGradient(0, 0, 0, height);
-  g.addColorStop(0, 'rgb(120, 200, 230)');
-  g.addColorStop(1, 'rgb(10, 50, 100)');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, width, height);
-  ctx.restore();
+  image(bgFarImg, 0, 0, width, height);
 }
 
 // -------------------------------------------------------------
@@ -214,29 +237,38 @@ function _drawLightRays() {
 }
 
 // -------------------------------------------------------------
-// 水草：底から生えて、ゆらゆら揺れる
-// back=true なら奥側（暗め）、false なら手前側（濃いシルエット）
+// 水草：scene.json の配置を画面にスケールして描画。
+// back=true は奥のレイヤー (魚より後ろ)、false は手前 (魚より前)。
+// sway フラグが立っている株 (06_/07_ の細長い葉) は根元を軸に微小回転。
 // -------------------------------------------------------------
 function _drawPlants(back) {
-  noStroke();
+  const layer = back ? 'back' : 'front';
+  const sx = width  / scene.canvas.w;  // 元 1920 -> canvas 幅
+  const sy = height / scene.canvas.h;  // 元 1080 -> canvas 高さ
+
   for (const p of plants) {
-    if (p.back !== back) continue;
-    const sway = sin(frameCount * 0.02 + p.sway) * 8;
+    if (p.layer !== layer) continue;
 
-    if (back) {
-      fill(20, 80, 60, 160);   // 奥は青緑で薄め
-    } else {
-      fill(10, 40, 30, 220);   // 手前は濃いシルエット
-    }
+    // 画面上のアンカー (根元) 座標
+    const ax = p.anchor_x * sx;
+    const ay = p.anchor_y * sy;
 
-    // 葉っぱを縦に何枚か並べる
+    // 画像内での根元の相対位置 (左上からの距離)
+    const localAnchorX = (p.anchor_x - p.crop_x);
+    const localAnchorY = (p.anchor_y - p.crop_y);
+
     push();
-    translate(p.x, height);
-    for (let i = 0; i < 5; i++) {
-      const y = -i * (p.h / 5);
-      const w = back ? 14 : 18;
-      ellipse(sway * (i / 5), y, w, p.h / 4);
+    translate(ax, ay);
+    if (p.swayAmp > 0) {
+      // sin で根元軸まわりに微小回転。振幅は _plantSwayAmp で株ごとに決定。
+      const angle = sin(frameCount * 0.02 + p.phase) * p.swayAmp;
+      rotate(angle);
     }
+    image(
+      p.img,
+      -localAnchorX * sx, -localAnchorY * sy,
+      p.crop_w * sx, p.crop_h * sy
+    );
     pop();
   }
 }
