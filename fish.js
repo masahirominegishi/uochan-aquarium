@@ -16,7 +16,10 @@
 //   - 角度は度。p5 の rotate() と同じく「正 = 時計回り (画面、y は下向き)」
 //
 // 状態 (ws-client.js から setState):
-//   idle / approach / speak / leave  ('speak' のとき talk セットへ即切り替え)
+//   idle / approach / speak / attentive / leave
+//   - 'speak'     : AI 発話中。talk セット + 口パク。
+//   - 'attentive' : AI が話し終えた直後の余韻 (sketch.js が ai_speak_end 後 AI_LINGER_MS 保つ)。
+//                   talk セットのまま (会話モードの見た目) だが口は閉じたまま動かさない。
 // =============================================================
 
 // pose_cycle を 1 周するのにかける基準フレーム数 (30fps 前提。state ごとに speed で割る)
@@ -124,7 +127,8 @@ class Fish {
   _speed() {
     switch (this.state) {
       case 'approach': return { cycle: 1.6, wave: 1.7 };
-      case 'speak':    return { cycle: 0.95, wave: 0.7 };
+      case 'speak':
+      case 'attentive': return { cycle: 0.95, wave: 0.7 };   // 余韻待機も話す時と同じ体の動き (口だけ閉じる)
       case 'leave':    return { cycle: 1.8, wave: 1.9 };
       default:         return { cycle: 1.67, wave: 1.6 };  // idle: 「両方伸びてる」区切り(p4→rest hold)をほぼ無くした分だけ全体も短縮 (他の区切りの実時間は据え置き)
     }
@@ -135,7 +139,8 @@ class Fish {
   //       指数減衰で 見本1/見本2 のあたりはほぼ停止 → 次のキックでまた すいーっと進む
   _velocityMul() {
     switch (this.state) {
-      case 'speak':    return 0.08;                       // ほぼ停止して話す
+      case 'speak':
+      case 'attentive': return 0.08;                      // ほぼ停止 (発話中 / 話し終わり後の余韻)
       case 'approach': return 1.6;
       case 'leave':    return 2.2;
       default: {
@@ -156,8 +161,8 @@ class Fish {
   update() {
     const sp = this._speed();
 
-    // swim ⇄ talk はパッと切り替え (フェードなし)
-    this.talkMix = (this.state === 'speak') ? 1 : 0;
+    // swim ⇄ talk はパッと切り替え (フェードなし)。speak も attentive (余韻待機) も talk セットを見せる。
+    this.talkMix = (this.state === 'speak' || this.state === 'attentive') ? 1 : 0;
 
     // 位相を進める (idle は「ひと休み」中だけ pose_cycle を据え置き = 腕を後ろに伸ばしたまま停止)
     if (this.state === 'idle' && this.idleRestUntil > 0) {

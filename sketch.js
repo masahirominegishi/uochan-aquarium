@@ -294,10 +294,13 @@ function windowResized() {
 //   AI 由来 (realtime_loop): ai_speak_start / ai_speak_end
 //
 // 両系統を独立に追跡し、AI 発話中は zone に関わらず魚は 'speak' 状態 (=口パク) を優先。
-// AI が黙ったら zone 状態に戻る。
+// AI が話し終えても即 zone 状態 (泳ぎ) には戻さず、AI_LINGER_MS だけ 'attentive'
+// (talk セットのまま・口は閉じる) で会話モードのまま待機させてから zone 状態へ戻す。
 // =============================================================
 let _zoneState = 'idle';   // zone 系の最新状態 (approach/speak/leave/idle)
 let _aiSpeaking = false;   // AI 発話中か
+let _aiLingerUntil = 0;    // ai_speak_end の後、この millis() まで 'attentive' (口を閉じて会話モードのまま待機)
+const AI_LINGER_MS = 5000; // ↑ 余韻の長さ。話し終わってから泳ぎに戻すまでの間 (ms)。
 
 window.aquarium = {
   onEvent(type, payload = {}) {
@@ -314,9 +317,12 @@ window.aquarium = {
         break;
       case 'ai_speak_start':
         _aiSpeaking = true;
+        _aiLingerUntil = 0;                       // 次のターン: 余韻待ちは打ち切って speak へ
         break;
       case 'ai_speak_end':
         _aiSpeaking = false;
+        _aiLingerUntil = millis() + AI_LINGER_MS; // 話し終わり → しばらく会話モードのまま (口は閉じて) 待機
+        setTimeout(() => window.aquarium._apply(), AI_LINGER_MS + 50);  // 余韻が切れたら泳ぎ (zone 状態) に戻す
         break;
       case 'fish_added':
         // 接続時の初期同期 + 新規アップロード時に bridge から飛んでくる
@@ -352,7 +358,10 @@ window.aquarium = {
   },
 
   _apply() {
-    const next = _aiSpeaking ? 'speak' : _zoneState;
+    let next;
+    if (_aiSpeaking)                    next = 'speak';
+    else if (millis() < _aiLingerUntil) next = 'attentive';   // 話し終わり後の余韻 (口を閉じて会話モードのまま待機)
+    else                                next = _zoneState;
     mainFish.setState(next);
   },
 
