@@ -333,15 +333,21 @@ let _zoneState = 'idle';   // zone 系の最新状態 (approach/speak/leave/idle
 let _aiSpeaking = false;   // AI 発話中か
 let _aiLingerUntil = 0;    // ai_speak_end の後、この millis() まで 'attentive' (口を閉じて会話モードのまま待機)
 const AI_LINGER_MS = 5000; // ↑ 余韻の長さ。話し終わってから泳ぎに戻すまでの間 (ms)。
+// 「会話中」フラグ: 1 度でも AI が発話を始めたら true、ゾーン状態が leave/idle になったら false。
+// AI 発話間の沈黙 (linger 超過) でも泳ぎに戻らず attentive を維持するためのもの (2026-05-14)。
+let _conversationActive = false;
 
 window.aquarium = {
   onEvent(type, payload = {}) {
     console.log('[aquarium] event:', type, payload);
     switch (type) {
       case 'approach':
+        _zoneState = type;
+        break;
       case 'leave':
       case 'idle':
         _zoneState = type;
+        _conversationActive = false;              // 客が水槽前から離れた → 会話モード解除 (泳ぎ復帰)
         break;
       case 'speak':
         // zone 由来 speak (5秒滞在で発火) は無視。口パク同期は AI 由来 (ai_speak_start) が担当する。
@@ -350,6 +356,7 @@ window.aquarium = {
       case 'ai_speak_start':
         _aiSpeaking = true;
         _aiLingerUntil = 0;                       // 次のターン: 余韻待ちは打ち切って speak へ
+        _conversationActive = true;               // 1 度でも AI が話したら会話モード ON (= ターン間も attentive 固定)
         break;
       case 'ai_speak_end':
         _aiSpeaking = false;
@@ -392,7 +399,8 @@ window.aquarium = {
   _apply() {
     let next;
     if (_aiSpeaking)                    next = 'speak';
-    else if (millis() < _aiLingerUntil) next = 'attentive';   // 話し終わり後の余韻 (口を閉じて会話モードのまま待機)
+    else if (_conversationActive)       next = 'attentive';   // 会話モード中: ターン間の沈黙でも泳ぎに戻さない (leave/idle で解除)
+    else if (millis() < _aiLingerUntil) next = 'attentive';   // (フォールバック) 会話モード外で AI が話した稀ケース用
     else                                next = _zoneState;
     mainFish.setState(next);
   },
