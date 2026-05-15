@@ -85,6 +85,15 @@ class Fish {
       for (let k = 0; k < n; k++) { if (keys[k] === 'p2' && keys[(k + 1) % n] === 'p3') { i = k; break; } }
       this.swimKickPhase = (i >= 0) ? bk[i] : 1 / 6;
     }
+    // 休憩復帰時に飛ばす cyclePhase: p3→p4 segment の頭。
+    // 休憩で手が「だらーん」と下がっているところから、p3 (=後ろ) に戻さず p4 (=肘を前にたたむ)
+    // への smoothstep に直接乗せて「ぶらーんから前に手を伸ばす」動きにする。
+    {
+      const keys = rig.swim.pose_cycle, bk = this.sets.swim.breaks, n = keys.length;
+      let i = -1;
+      for (let k = 0; k < n; k++) { if (keys[k] === 'p3' && keys[(k + 1) % n] === 'p4') { i = k; break; } }
+      this.idleRestExitPhase = (i >= 0) ? bk[i] : IDLE_REST_PHASE;
+    }
 
     // 位置・速度 (画面座標)
     this.x  = width * 0.5;
@@ -211,6 +220,9 @@ class Fish {
         this.idleRestUntil = 0;
         this.idleCyclesDone = 0;
         this.idleSwimsUntilRest = Math.floor(random(IDLE_SWIMS_MIN, IDLE_SWIMS_MAX));
+        // 復帰時、cyclePhase を p3→p4 segment の頭にジャンプ (手を後ろに戻さず前へ伸ばす方へ流す)。
+        // droop の 0.5s fade と p3→p4 smoothstep がほぼ重なるので「だらーん→前へ」が滑らかに繋がる
+        this.cyclePhase = this.idleRestExitPhase;
       }
       // 休憩中は cyclePhase を進めない (tailPhase 等は下で通常どおり進めるので体はゆらゆら漂う)
     } else {
