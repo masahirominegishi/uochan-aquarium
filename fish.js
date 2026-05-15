@@ -256,9 +256,14 @@ class Fish {
 
     // 横移動
     this.x += this.vx * this._velocityMul();
-    const dom = this.sets[this._dominantSet()];
-    const halfW = dom.cfg.canvas_width * dom.scale * 0.5;
-    const halfH = dom.cfg.canvas_height * dom.scale * 0.5;
+    // 壁判定は swim/talk の大きい方の canvas で固定する。dominantSet ごとに変えると
+    // 状態遷移 (idle→speak 等) で「swim 壁内・talk 壁外」になり頭/手がはみ出す
+    const halfW = Math.max(
+      this.sets.swim.cfg.canvas_width  * this.sets.swim.scale * 0.5,
+      this.sets.talk.cfg.canvas_width  * this.sets.talk.scale * 0.5);
+    const halfH = Math.max(
+      this.sets.swim.cfg.canvas_height * this.sets.swim.scale * 0.5,
+      this.sets.talk.cfg.canvas_height * this.sets.talk.scale * 0.5);
     if (this.x < halfW && this.vx < 0)             this.vx = Math.abs(this.vx);
     if (this.x > width - halfW && this.vx > 0)     this.vx = -Math.abs(this.vx);
 
@@ -442,7 +447,18 @@ class Fish {
     if ((set.cfg.snap_from || []).includes(cycleKeys[seg])) {
       f = 1;                        // この区切りは『間を飛ばして一気に』— 区切りの頭で次ポーズへスナップ
     } else {
-      f = f * f * (3 - 2 * f);      // smoothstep
+      // flow_through に入っている pose を「通り抜け」キーフレームとして扱う:
+      //   そこに向かう区切り = ease_in (終わり全速 = キー手前で減速しない)
+      //   そこから出る区切り = ease_out (始まり全速 = キー直後で加速しない)
+      //   両端 flow_through = linear (定速で通過)
+      // これで pose 列に「中継点」を作っても velocity 0 で停止せず流れる動きになる。
+      const flow = set.cfg.flow_through || [];
+      const endsAtFlow   = flow.includes(cycleKeys[(seg + 1) % n]);
+      const startsAtFlow = flow.includes(cycleKeys[seg]);
+      if (endsAtFlow && startsAtFlow)      { /* linear: f そのまま */ }
+      else if (endsAtFlow)                 { f = f * f; }                          // ease_in
+      else if (startsAtFlow)               { f = 1 - (1 - f) * (1 - f); }          // ease_out
+      else                                 { f = f * f * (3 - 2 * f); }            // smoothstep (両端 ease)
     }
     const a = set.cfg.poses[cycleKeys[seg]][layer.name];
     const b = set.cfg.poses[cycleKeys[(seg + 1) % n]][layer.name];

@@ -38,8 +38,9 @@
       "p4":   { "arm_l": [-85, 100], "arm_r": [-85, 100], "leg_l": [-12, 6],  "leg_r": [-12, 6] }
     },
     "pose_cycle": ["rest", "p2", "p2", "p3", "p3", "p3", "p4"],
-    "cycle_weights": [0.4, 0.6, 1, 1, 1, 1, 0.06],
-    "snap_from": ["p2", "p4"]
+    "cycle_weights": [0.4, 0.6, 1, 1, 1, 1, 0.5],
+    "snap_from": ["p2"],
+    "flow_through": ["p4"]
   },
 
   "talk": {
