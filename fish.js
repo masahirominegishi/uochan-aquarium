@@ -149,6 +149,9 @@ class Fish {
     } else {
       this.vy = 0;                              // idle 以外は水平維持 (tilt は target=0 で自然に戻る)
     }
+    if (newState === 'sleep') {
+      this.vx = 0;                              // 寝ているときは横移動も止める
+    }
     // swim ⇄ talk の遷移: 双方向で swim rig のまま pose 角を縮めた状態を TALK_TRANSITION_MS だけ挟む。
     // 実切替は millis() で完了させる (update 側)。
     if (!wasTalking && willTalk) {
@@ -178,6 +181,7 @@ class Fish {
       case 'speak':
       case 'attentive': return { cycle: 0.95, wave: 0.7 };   // 余韻待機も話す時と同じ体の動き (口だけ閉じる)
       case 'leave':    return { cycle: 1.8, wave: 1.9 };
+      case 'sleep':    return { cycle: 0,    wave: 0.25 };   // 寝てる: pose を固定 (cycle 進めない)、しなりは弱く呼吸感
       default:         return { cycle: 1.67, wave: 1.6 };  // idle: 「両方伸びてる」区切り(p4→rest hold)をほぼ無くした分だけ全体も短縮 (他の区切りの実時間は据え置き)
     }
   }
@@ -296,18 +300,19 @@ class Fish {
     const bobAmp = (this.state === 'leave') ? 1.6 : 0.5;
     this.y += sin(this.bobPhase) * bobAmp;
 
-    // 瞬き (talk が見えているときだけ進める)
-    if (this.talkMix > 0.05) {
+    // 瞬き — swim/talk どちらでも、現在の dominant set に blink config があれば進める
+    const domBlink = this.sets[this._dominantSet()].cfg.blink;
+    if (domBlink) {
       const now = millis();
       if (this.blinkProgress < 0 && (now - this.lastBlinkAt) / 1000 > this.nextBlinkInterval) {
         this.blinkProgress = 0;
       }
       if (this.blinkProgress >= 0) {
-        this.blinkProgress += 1 / Math.max(1, Math.round(this.rig.talk.blink.dur_ms / 33.3));
+        this.blinkProgress += 1 / Math.max(1, Math.round(domBlink.dur_ms / 33.3));
         if (this.blinkProgress > 1) {
           this.blinkProgress = -1;
           this.lastBlinkAt = now;
-          this.nextBlinkInterval = random(this.rig.talk.blink.interval_min, this.rig.talk.blink.interval_max);
+          this.nextBlinkInterval = random(domBlink.interval_min, domBlink.interval_max);
         }
       }
     }
@@ -355,7 +360,7 @@ class Fish {
     switch (layer.type) {
       case 'spine':  this._drawSpine(set); break;
       case 'static': this._drawStatic(set, layer); break;
-      case 'eye':    this._drawEye(set); break;
+      case 'eye':    this._drawEye(set, layer); break;
       case 'mouth':  this._drawMouth(set); break;
       case 'limb':   this._drawLimb(set, layer, cycleKeys); break;
       default: break;
@@ -410,15 +415,27 @@ class Fish {
     }
   }
 
-  _drawEye(set) {
+  _drawEye(set, layer) {
     const b = set.cfg.blink;
     let key = b.open;
-    if (this.blinkProgress >= 0) {
+    if (this.state === 'sleep') {
+      key = b.closed;                                 // 寝ているときは常に閉じ目
+    } else if (this.blinkProgress >= 0) {
       const p = this.blinkProgress;
       if (p >= 0.25 && p <= 0.75) key = b.closed;   // 中盤だけ閉じる
     }
     const img = set.imgs[key];
-    if (img) image(img, 0, 0);
+    if (!img) return;
+    // anchor_x が指定されていれば body のしなりに同期 (目だけ画面上で固定気味だが微妙に動く)
+    const wx = (layer && layer.anchor_x != null) ? layer.anchor_x : null;
+    if (wx != null) {
+      push();
+      translate(0, this._waveYAt(set, wx));
+      image(img, 0, 0);
+      pop();
+    } else {
+      image(img, 0, 0);
+    }
   }
 
   _drawMouth(set) {
@@ -473,6 +490,11 @@ class Fish {
     if (this.idleDroop > 0 && set === this.sets.swim) {
       const d = REST_DROOP[layer.name];
       if (d) { uDeg += d.u * this.idleDroop; lDeg += d.l * this.idleDroop; }
+    }
+    // 寝ているとき: pose を sleep に固定 (cycle/transition/droop に依らず上書き)
+    if (this.state === 'sleep' && set.cfg.poses.sleep && set.cfg.poses.sleep[layer.name]) {
+      uDeg = set.cfg.poses.sleep[layer.name][0] * ampMul;
+      lDeg = set.cfg.poses.sleep[layer.name][1] * ampMul;
     }
     const uRad = uDeg * PI / 180, lRad = lDeg * PI / 180;
 

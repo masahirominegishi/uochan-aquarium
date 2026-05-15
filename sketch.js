@@ -45,6 +45,7 @@ let _startupSpawnIdx    = 0;      // golden-ratio で x をばらけさせるた
 // うおちゃん本体のパーツ名 (preload で全部読み込む)。実体は assets/uochan_swim/ と assets/uochan_talk/。
 const SWIM_PART_NAMES = [
   'body', 'fin',
+  'eye_open', 'eye_closed',
   'arm_l', 'arm_l_hand', 'arm_r', 'arm_r_hand',
   'leg_l', 'leg_l_shin', 'leg_r', 'leg_r_shin',
 ];
@@ -346,6 +347,7 @@ window.aquarium = {
         break;
       case 'leave':
       case 'idle':
+      case 'sleep':
         _zoneState = type;
         _conversationActive = false;              // 客が水槽前から離れた → 会話モード解除 (泳ぎ復帰)
         break;
