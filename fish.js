@@ -43,6 +43,18 @@ const REST_DROOP = {
   leg_r: { u: 12, l: 8 }
 };
 
+// swim ⇄ talk の中間フレーム: 切替を緩衝するため、swim rig のまま pose 角を縮めて talk 寄り
+// (まっすぐ立った姿勢) に寄せた時間を挟む。時間ベース (ms) でないと state の cycle 速度差で
+// 遷移時間が大きく変わって体感が悪い (speak は cycle 速度が遅いので cycle 数だと長すぎる)。
+const TALK_TRANSITION_MS         = 500;
+const TALK_TRANSITION_POSE_SCALE = 0.4;
+
+// idle 時の縦移動 (GuestFish と同じ仕組み)。approach / leave / speak / attentive では vy=0 で水平維持。
+const FISH_TILT_MAX_DEG = 15;    // 進行方向への傾き上限 (兼: 上下動の角度上限)
+const FISH_TILT_LERP    = 0.12;  // 傾きの補間係数
+const FISH_TURN_MIN_SEC = 2.5;   // 進行角を変える間隔の下限
+const FISH_TURN_MAX_SEC = 6.0;   // 〃 上限
+
 class Fish {
   // rig:    rig.json の中身 ({ swim:{...}, talk:{...} })
   // images: { swim: { name -> p5.Image }, talk: { name -> p5.Image } }
@@ -79,14 +91,20 @@ class Fish {
     this.y  = height * 0.5;
     this.vx = -0.6;
     this.vy = 0;
+    this.tilt = 0;          // 進行方向への傾き (rad)、idle 中だけ vy 由来で振れる
+    this.nextTurnAt = 0;    // idle 中の進行角再抽選タイマー (millis(), 0=初回フレームで即発火)
 
     // 状態
     this.state = 'idle';
     this.stateChangedAt = millis();
     this.speakStartedAt = 0;
 
-    // talk への寄り具合 0..1 (0 = swim だけ / 1 = talk だけ / 中間 = クロスフェード)
+    // talk への寄り具合 (0 = swim rig / 1 = talk rig)。pretalk/posttalk 中は 0 のままで、
+    // swim rig の pose 角を縮めて talk 姿勢に寄せる (実切替は talkRigActive で管理)。
     this.talkMix = 0;
+    this.talkRigActive = false;          // 実際に talk rig を描いているか
+    this.transitionState = null;         // null | 'pretalk' (swim→talk へ向かう中) | 'posttalk' (talk→swim から戻り中)
+    this.transitionEndAt = 0;            // 中間フレーム終了時刻 (millis())
 
     // アニメ位相
     this.tailPhase  = 0;            // しなり
@@ -109,6 +127,8 @@ class Fish {
   // -----------------------------------------------------------
   setState(newState) {
     if (this.state === newState) return;
+    const wasTalking = (this.state === 'speak' || this.state === 'attentive');
+    const willTalk   = (newState === 'speak'   || newState === 'attentive');
     this.state = newState;
     this.stateChangedAt = millis();
     if (newState === 'speak') this.speakStartedAt = millis();
@@ -116,8 +136,27 @@ class Fish {
       this.idleCyclesDone = 0;
       this.idleSwimsUntilRest = Math.floor(random(IDLE_SWIMS_MIN, IDLE_SWIMS_MAX));
       this.idleRestUntil = 0;
+      this.nextTurnAt = millis();               // 初回フレームで即 vy 抽選
+    } else {
+      this.vy = 0;                              // idle 以外は水平維持 (tilt は target=0 で自然に戻る)
     }
-    console.log(`[Fish] state -> ${newState}`);
+    // swim ⇄ talk の遷移: 双方向で swim rig のまま pose 角を縮めた状態を TALK_TRANSITION_MS だけ挟む。
+    // 実切替は millis() で完了させる (update 側)。
+    if (!wasTalking && willTalk) {
+      this.transitionState = 'pretalk';
+      this.transitionEndAt = millis() + TALK_TRANSITION_MS;
+      // talkRigActive はまだ false のまま (pretalk 完了時に true へ)
+    } else if (wasTalking && !willTalk) {
+      if (this.talkRigActive) {
+        this.transitionState = 'posttalk';
+        this.transitionEndAt = millis() + TALK_TRANSITION_MS;
+        this.talkRigActive = false;
+      } else {
+        // pretalk 途中でキャンセル → そのまま swim へ
+        this.transitionState = null;
+      }
+    }
+    console.log(`[Fish] state -> ${newState}${this.transitionState ? ` (${this.transitionState})` : ''}`);
   }
 
   // 現在「主に見えている」セット名 (壁判定などに使う)
@@ -161,10 +200,12 @@ class Fish {
   update() {
     const sp = this._speed();
 
-    // swim ⇄ talk はパッと切り替え (フェードなし)。speak も attentive (余韻待機) も talk セットを見せる。
-    this.talkMix = (this.state === 'speak' || this.state === 'attentive') ? 1 : 0;
+    // swim ⇄ talk: pretalk/posttalk 中間フレームを介して切り替え (setState 側で transition を仕込む)。
+    // talkRigActive が確定値、talkMix はそれの 0/1 表現。
+    this.talkMix = this.talkRigActive ? 1 : 0;
 
     // 位相を進める (idle は「ひと休み」中だけ pose_cycle を据え置き = 腕を後ろに伸ばしたまま停止)
+    let cycleWrapped = false;
     if (this.state === 'idle' && this.idleRestUntil > 0) {
       if (millis() >= this.idleRestUntil) {                 // ひと休みおわり → 再開 (次の休憩までの周数を引き直す)
         this.idleRestUntil = 0;
@@ -175,8 +216,9 @@ class Fish {
     } else {
       const prevPhase = this.cyclePhase;
       this.cyclePhase = (this.cyclePhase + (sp.cycle / RIG_CYCLE_FRAMES)) % 1;
+      cycleWrapped = this.cyclePhase < prevPhase;
       if (this.state === 'idle') {
-        if (this.cyclePhase < prevPhase) this.idleCyclesDone++;       // pose_cycle を 1 周した
+        if (cycleWrapped) this.idleCyclesDone++;                       // pose_cycle を 1 周した
         // そろそろ疲れた & 腕を後ろに伸ばした (p3 hold) ところに来た → ひと休み開始
         if (this.idleCyclesDone >= this.idleSwimsUntilRest
             && prevPhase < IDLE_REST_PHASE && this.cyclePhase >= IDLE_REST_PHASE) {
@@ -184,6 +226,11 @@ class Fish {
           this.idleRestUntil = millis() + random(IDLE_REST_MIN_MS, IDLE_REST_MAX_MS);
         }
       }
+    }
+    // pretalk/posttalk: 時間経過で完了 (TALK_TRANSITION_MS)
+    if (this.transitionState && millis() >= this.transitionEndAt) {
+      if (this.transitionState === 'pretalk') this.talkRigActive = true;
+      this.transitionState = null;
     }
     // だらーん係数: ひと休み中はじわっと増 → 動き出したらじわっと戻る
     const droopUp = (this.state === 'idle' && this.idleRestUntil > 0);
@@ -199,10 +246,36 @@ class Fish {
     this.x += this.vx * this._velocityMul();
     const dom = this.sets[this._dominantSet()];
     const halfW = dom.cfg.canvas_width * dom.scale * 0.5;
+    const halfH = dom.cfg.canvas_height * dom.scale * 0.5;
     if (this.x < halfW && this.vx < 0)             this.vx = Math.abs(this.vx);
     if (this.x > width - halfW && this.vx > 0)     this.vx = -Math.abs(this.vx);
 
-    // 縦のゆらぎ (leave は強調)
+    // idle のみ縦移動: GuestFish 風に FISH_TURN_MIN/MAX_SEC 秒ごとに進行角を ±FISH_TILT_MAX_DEG 内で再抽選。
+    // 休憩中 (idleRestUntil > 0) は再抽選しないが既存 vy で漂う (= ふわふわ浮く)。
+    if (this.state === 'idle' && this.idleRestUntil <= 0 && millis() >= this.nextTurnAt) {
+      const maxR = (FISH_TILT_MAX_DEG * Math.PI) / 180;
+      const ang  = random(-maxR, maxR);
+      const baseSpd = Math.max(0.35, Math.hypot(this.vx, this.vy));
+      const dir  = this.vx >= 0 ? 1 : -1;        // 水平向きは維持 (壁反射に従う)
+      this.vx = dir * baseSpd * Math.cos(ang);
+      this.vy = baseSpd * Math.sin(ang);
+      this.nextTurnAt = millis() + random(FISH_TURN_MIN_SEC, FISH_TURN_MAX_SEC) * 1000;
+    }
+    // vy にも _velocityMul を掛けてキック失速パターンを縦にも適用 (= 傾いた方向にキックで前進する)
+    this.y += this.vy * this._velocityMul();
+    if (this.y < halfH && this.vy < 0)             this.vy = Math.abs(this.vy);
+    if (this.y > height - halfH && this.vy > 0)    this.vy = -Math.abs(this.vy);
+
+    // 進行方向への傾き (idle で vy がある時のみ振れる、非 idle は vy=0 で自然に 0 へ収束)
+    {
+      const maxTilt = (FISH_TILT_MAX_DEG * Math.PI) / 180;
+      let pitch = Math.atan2(this.vy, Math.abs(this.vx) + 0.0001);
+      pitch = Math.max(-maxTilt, Math.min(maxTilt, pitch));
+      const target = (this.vx >= 0) ? pitch : -pitch;
+      this.tilt += (target - this.tilt) * FISH_TILT_LERP;
+    }
+
+    // 縦の微小ゆらぎ (leave は強調) — vy とは別に体の呼吸的なゆらぎ
     const bobAmp = (this.state === 'leave') ? 1.6 : 0.5;
     this.y += sin(this.bobPhase) * bobAmp;
 
@@ -236,6 +309,7 @@ class Fish {
     const cfg = set.cfg;
     push();
     translate(this.x, this.y);
+    rotate(this.tilt);                       // idle 中の縦移動に応じて進行方向に傾ける (GuestFish と同様)
     const flip = this.vx > 0 ? -1 : 1;       // 元画像は左向き。右へ泳ぐときだけ反転
     scale(flip * set.scale, set.scale);
     translate(-set.anchor[0], -set.anchor[1]);
@@ -362,6 +436,11 @@ class Fish {
     const b = set.cfg.poses[cycleKeys[(seg + 1) % n]][layer.name];
     let uDeg = lerp(a[0], b[0], f) * ampMul;
     let lDeg = lerp(a[1], b[1], f) * ampMul;
+    // pretalk/posttalk: swim rig のまま pose 角を縮めて talk 姿勢 (rest=全 0) に寄せる
+    if (this.transitionState) {
+      uDeg *= TALK_TRANSITION_POSE_SCALE;
+      lDeg *= TALK_TRANSITION_POSE_SCALE;
+    }
     // ひと休み中 (idle・swim) は手足がゆっくり下がる「だらーん」
     if (this.idleDroop > 0 && set === this.sets.swim) {
       const d = REST_DROOP[layer.name];

@@ -54,13 +54,14 @@
     "layers": [
       { "type": "limb", "name": "arm_r", "upper": "arm_r", "lower": "arm_r_hand",
         "proximal": [544, 708], "distal": [392, 747], "anchor": "body", "phase": 0.10, "amp_mul": 0.9 },
-      { "type": "limb", "name": "leg_l", "upper": "leg_l", "lower": "leg_l_shin", "lower_under": true,
-        "proximal": [1084, 962], "distal": [1100, 1110], "anchor": "body", "phase": 0.50 },
+      { "type": "limb", "name": "leg_r", "upper": "leg_r", "lower": "leg_r_shin", "lower_under": true,
+        "proximal": [922, 924], "distal": [820, 1085], "anchor": "body", "phase": 0.00 },
       { "type": "spine", "name": "body" },
       { "type": "eye", "name": "eye" },
       { "type": "mouth", "name": "mouth" },
-      { "type": "limb", "name": "leg_r", "upper": "leg_r", "lower": "leg_r_shin", "lower_under": true,
-        "proximal": [922, 924], "distal": [820, 1085], "anchor": "body", "phase": 0.00 },
+      { "type": "limb", "name": "leg_l", "upper": "leg_l", "lower": "leg_l_shin", "lower_under": true,
+        "offset": [-38, -17],
+        "proximal": [1084, 962], "distal": [1100, 1110], "anchor": "body", "phase": 0.50 },
       { "type": "limb", "name": "arm_l", "upper": "arm_l", "lower": "arm_l_hand",
         "proximal": [705, 796], "distal": [602, 898], "anchor": "body", "phase": 0.00 },
       { "type": "static", "name": "fin", "image": "fin", "anim": "flap", "pivot": [660, 628], "amp_deg": 7, "speed": 0.10 }
