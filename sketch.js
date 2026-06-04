@@ -340,6 +340,12 @@ const AI_LINGER_MS = 5000; // ↑ 余韻の長さ。話し終わってから泳�
 // AI 発話間の沈黙 (linger 超過) でも泳ぎに戻らず attentive を維持するためのもの (2026-05-14)。
 let _conversationActive = false;
 
+// お祝いポップの全体クールダウン: 飼い主検出が 001→None→001 と一瞬ちらつくたびに
+// 別の魚が次々ポップして「複数匹が一気に動く」のを防ぐ。直近にどれか 1 匹がポップしたら
+// この時間は新規ポップを抑止する (1 回の来訪につき 1 匹だけ、を担保)。
+const OWNER_CELEBRATE_COOLDOWN_MS = 8000;
+let _lastOwnerCelebrateAt = -1e9;
+
 window.aquarium = {
   onEvent(type, payload = {}) {
     console.log('[aquarium] event:', type, payload);
@@ -393,10 +399,15 @@ window.aquarium = {
           // 「今 false→true に在席化する」魚 = 飼い主が今まさに現れたとみなせる魚
           const newlyPresent = guestFishes.filter((g) => ids.has(g.id) && !g.isHighlighted);
           for (const g of guestFishes) g.setHighlighted(ids.has(g.id));
-          // 新規在席のうちクールダウン明けの 1 匹だけ「お祝いポップ」(複数登録ならランダム)
-          const eligible = newlyPresent.filter((g) => g.canCelebrate());
-          if (eligible.length > 0) {
-            eligible[Math.floor(Math.random() * eligible.length)].celebrate();
+          // 新規在席のうちクールダウン明けの 1 匹だけ「お祝いポップ」(複数登録ならランダム)。
+          // 全体クールダウン中 (直近にどれかがポップ済み) は抑止 = 検出ちらつきで複数匹が
+          // 一気に動くのを防ぐ。
+          if (millis() - _lastOwnerCelebrateAt >= OWNER_CELEBRATE_COOLDOWN_MS) {
+            const eligible = newlyPresent.filter((g) => g.canCelebrate());
+            if (eligible.length > 0) {
+              eligible[Math.floor(Math.random() * eligible.length)].celebrate();
+              _lastOwnerCelebrateAt = millis();
+            }
           }
         }
         return;
