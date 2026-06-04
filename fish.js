@@ -573,6 +573,7 @@ const GUEST_POP_RECEDE_MS  = 1040;   // センター→奥へ去りながら A �
 const GUEST_POP_HOLD_TAIL  = 2.2;    // hold 中のしっぽ速度倍率 (魚っぽい振り)
 const GUEST_POP_HOLD_AMP   = 1.5;    // hold 中のしっぽ振幅倍率
 const GUEST_POP_SWIM_BOB   = 9;      // approach/recede の上下うねり幅 (px、泳いでる感)
+const GUEST_POP_ARC        = 170;    // approach/recede を弧状にする上向きの反り (px、両端0・中央最大)
 
 // イージング (p5 に無いので簡易版)
 function _easeOutCubic(p)  { const q = 1 - p; return 1 - q * q * q; }
@@ -779,8 +780,9 @@ class GuestFish {
       const e = _easeInOutCubic(p);
       this.bobPhase += 0.12;
       const bob = Math.sin(this.bobPhase) * GUEST_POP_SWIM_BOB * (1 - e);
+      const arc = -Math.sin(Math.PI * e) * GUEST_POP_ARC;   // 上に弧を描いて手前へ
       this.x = lerp(this.dartX, this.popCenterX, e);
-      this.y = lerp(this.dartY, this.popCenterY, e) + bob;
+      this.y = lerp(this.dartY, this.popCenterY, e) + arc + bob;
       this.scale = lerp(this.popBaseScale, this.popScaleTarget, e);
       this.facing = (this.popCenterX >= this.dartX) ? 1 : -1;
       this.tailPhase += this.waveSpeed * 1.6;
@@ -803,9 +805,10 @@ class GuestFish {
       const e = _easeInOutCubic(p);
       this.bobPhase += 0.12;
       const bob = Math.sin(this.bobPhase) * GUEST_POP_SWIM_BOB * (1 - e);
+      const arc = -Math.sin(Math.PI * e) * GUEST_POP_ARC;   // 上に弧を描いて奥へ
       this.scale = lerp(this.popScaleTarget, this._targetScale(), e);
       this.x = lerp(this.popCenterX, this.popHomeX, e);
-      this.y = lerp(this.popCenterY, this.popHomeY, e) + bob;
+      this.y = lerp(this.popCenterY, this.popHomeY, e) + arc + bob;
       this.facing = (this.popHomeX >= this.popCenterX) ? 1 : -1;
       this.tailPhase += this.waveSpeed * 1.6;
       if (p >= 1) {
