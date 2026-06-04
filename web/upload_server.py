@@ -209,7 +209,12 @@ async def static_handler(request: web.Request) -> web.Response:
         target = candidate
     if not target.exists() or not target.is_file():
         return web.Response(status=404)
-    return web.FileResponse(target)
+    resp = web.FileResponse(target)
+    # kiosk(chromium) が古い JS/HTML をヒューリスティックキャッシュで握り続け、
+    # 再起動しても再検証せず古い版を使う問題への対策。no-cache で毎回再検証させる
+    # (FileResponse の ETag/Last-Modified で未変更なら 304 が返るので帯域コストは小さい)。
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 # ─── アップロードフォーム HTML ─────────────────────────
