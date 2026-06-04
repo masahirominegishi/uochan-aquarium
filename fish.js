@@ -562,7 +562,7 @@ const GUEST_NOTICE_BOB     = 1.8;   // リアクション中の上下ゆらぎ�
 // 飼い主が現れた瞬間の「お祝いポップ」演出 (setOwnerPresent → celebrate())。
 // dart(端へ素早く) → grow(スーッと巨大化) → shake(しっぽブルブル) → return(縮みながら元位置へ)。
 // A サイズ (GUEST_SIZE_BIG) に落ち着く前にワンクッション挟む派手な歓迎。動きは速め。
-const GUEST_POP_FRAC       = 1 / 3;  // 巨大化サイズ = min(width,height) * これ (長辺 px)
+const GUEST_POP_FRAC       = 1 / 3;  // 巨大化サイズ = 画面の長辺(横幅) * これ (魚の長辺 px)
 const GUEST_POP_COOLDOWN   = 10000;  // 同じ魚を再ポップさせない最小間隔 (ms)
 const GUEST_POP_DART_MS    = 200;    // 端へ素早くダート
 const GUEST_POP_GROW_MS    = 280;    // スーッと巨大化
@@ -685,8 +685,9 @@ class GuestFish {
     this.popHomeY     = this.y;
     this.popBaseScale = this.scale;
 
-    // 巨大化サイズと、見切れないようクランプした端の表示位置
-    const popLong = Math.min(width, height) * GUEST_POP_FRAC;
+    // 巨大化サイズと、見切れないようクランプした端の表示位置。
+    // 横長モニタ前提で「画面の長辺(横幅)」基準にする (短辺基準だと横幅に対して小さすぎる)。
+    const popLong = Math.max(width, height) * GUEST_POP_FRAC;
     const halfPop = popLong * 0.5;
     this.popScaleTarget = popLong / this._longest;
     const goRight = this.x > width / 2;            // 近い側の横端へ寄せる
