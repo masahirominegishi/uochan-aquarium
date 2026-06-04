@@ -196,13 +196,14 @@ class Fish {
       case 'approach': return 1.6;
       case 'leave':    return 2.2;
       default: {
-        if (this.idleRestUntil > 0) return 0.04;            // ひと休み中はほぼ停止
+        // 「泳いでいる時は常に進む」: ひと休み中もキックの合間も前進が止まらないよう下限を確保。
+        // キックの瞬間の加速サージ (平泳ぎ感) はそのまま残す。
+        if (this.idleRestUntil > 0) return 0.6;             // ひと休み中もゆっくり前進し続ける (旧 0.04)
         // キックは p2→p3 の区切りの頭 (cyclePhase = this.swimKickPhase)。
-        // 蹴った瞬間に大げさに前進 → 最初は速く・急に失速 → 見本3 保持の途中で停止 →
-        // 腕の戻し (p3→p4 肘たたみ → p4→rest 伸ばし) と 手を伸ばしてる短い時間 はほぼ停止 → 次のキックでまた
+        // 蹴った瞬間に大げさに前進 → サージ。合間も下限 0.8 で常にじわっと前進する。
         const sinceKick = ((this.cyclePhase - this.swimKickPhase) % 1 + 1) % 1; // 0 = 蹴った直後
         const t = Math.max(0, 1 - sinceKick / 0.5);
-        return 0.05 + 48 * Math.pow(t, 2.6);
+        return 0.8 + 48 * Math.pow(t, 2.6);
       }
     }
   }
