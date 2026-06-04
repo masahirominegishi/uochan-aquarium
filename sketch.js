@@ -402,7 +402,9 @@ window.aquarium = {
           // 新規在席のうちクールダウン明けの 1 匹だけ「お祝いポップ」(複数登録ならランダム)。
           // 全体クールダウン中 (直近にどれかがポップ済み) は抑止 = 検出ちらつきで複数匹が
           // 一気に動くのを防ぐ。
-          if (millis() - _lastOwnerCelebrateAt >= OWNER_CELEBRATE_COOLDOWN_MS) {
+          // うおちゃんとの会話中は派手なポップを出さない (会話の邪魔をしない)。
+          const inConversation = _conversationActive || _aiSpeaking;
+          if (!inConversation && millis() - _lastOwnerCelebrateAt >= OWNER_CELEBRATE_COOLDOWN_MS) {
             const eligible = newlyPresent.filter((g) => g.canCelebrate());
             if (eligible.length > 0) {
               eligible[Math.floor(Math.random() * eligible.length)].celebrate();
