@@ -560,17 +560,14 @@ const GUEST_NOTICE_SPEED   = 1.5;   // リアクション中の遊泳速度倍�
 const GUEST_NOTICE_BOB     = 1.8;   // リアクション中の上下ゆらぎ倍率 (はしゃぐ感)
 
 // 飼い主が現れた瞬間の「お祝いポップ」演出 (setOwnerPresent → celebrate())。
-// dart(端へ素早く) → grow(スーッと巨大化) → shake(しっぽブルブル) → return(縮みながら元位置へ)。
-// A サイズ (GUEST_SIZE_BIG) に落ち着く前にワンクッション挟む派手な歓迎。動きは速め。
-const GUEST_POP_LONG_PX    = 1800;   // 巨大化サイズ = 魚の長辺 px (1920幅でほぼ全幅)。画面幅の98%で頭打ち
+// dart(端へ素早く) → approach(端→センターへ泳ぎながら拡大=水槽の奥から手前へ) →
+// recede(センター→奥へ泳ぎながら A サイズに縮小)。手前 (approach/recede) の間だけ
+// うおちゃんより前のレイヤーに描画する (isPopFront)。
+const GUEST_POP_FRAC       = 1 / 4;  // 手前ピークサイズ = 画面の長辺 * これ (魚の長辺 px、1920で480px)
 const GUEST_POP_COOLDOWN   = 10000;  // 同じ魚を再ポップさせない最小間隔 (ms)
-const GUEST_POP_DART_MS    = 200;    // 端へ素早くダート
-const GUEST_POP_GROW_MS    = 280;    // スーッと巨大化
-const GUEST_POP_SHAKE_MS   = 420;    // しっぽブルブル (巨大サイズ維持)
-const GUEST_POP_RETURN_MS  = 320;    // すーっと縮みながら元位置へ戻る
-const GUEST_POP_SHAKE_TAIL = 4.0;    // ブルブル中のしっぽ速度倍率
-const GUEST_POP_SHAKE_AMP  = 1.7;    // ブルブル中のしっぽ振幅倍率
-const GUEST_POP_JITTER_PX  = 6;      // ブルブル中の左右ジッター幅 (px)
+const GUEST_POP_DART_MS    = 180;    // 端へ素早くダート
+const GUEST_POP_APPROACH_MS = 520;   // 端→センター、奥から手前へ来ながら拡大
+const GUEST_POP_RECEDE_MS  = 520;    // センター→奥へ去りながら A サイズに縮小
 
 // イージング (p5 に無いので簡易版)
 function _easeOutCubic(p)  { const q = 1 - p; return 1 - q * q * q; }
@@ -593,14 +590,16 @@ class GuestFish {
     this.excitedUntil = 0;          // 飼い主に気づいた瞬間からこの時刻まで「気づいたよ!」リアクション
 
     // お祝いポップ演出の状態 (celebrate() で起動)
-    this.popPhase        = null;    // null | 'dart' | 'grow' | 'shake' | 'return'
+    this.popPhase        = null;    // null | 'dart' | 'approach' | 'recede'
     this.popStartedAt    = 0;       // 現フェーズの開始 millis()
     this._lastCelebrateAt = -1e9;   // 最後にポップした millis() (クールダウン判定)
-    this._tailAmpMul     = 1;       // しっぽ振幅倍率 (shake 中だけ上げる)
-    this.popHomeX = 0; this.popHomeY = 0;        // ポップ開始時の元位置
-    this.popTargetX = 0; this.popTargetY = 0;    // 端の表示位置 (見切れない範囲にクランプ)
-    this.popBaseScale = 0;          // grow 起点スケール
-    this.popScaleTarget = 0;        // 巨大化目標スケール
+    this._tailAmpMul     = 1;       // しっぽ振幅倍率 (将来用、通常 1)
+    this.popHomeX = 0; this.popHomeY = 0;        // ポップ開始時の元位置 (recede の戻り先)
+    this.dartX = 0;   this.dartY = 0;            // ダート先 (近い側の端)
+    this.dartFromRight = false;                  // 右端へダートするか
+    this.popCenterX = 0; this.popCenterY = 0;    // 手前ピークの位置 (画面センター)
+    this.popBaseScale = 0;          // approach 起点スケール
+    this.popScaleTarget = 0;        // 手前ピークの目標スケール (画面1/4)
 
     // 入場演出:
     //  - dropIn:       今日新規登録された魚。上からドロップイン + 着水音 + その日ずっと big。
@@ -675,7 +674,7 @@ class GuestFish {
   }
 
   // 飼い主が現れた瞬間の「お祝いポップ」を起動する (sketch 側で 1 匹だけ選んで呼ぶ)。
-  // dart → grow → shake → return の 4 フェーズ。起動できたら true。
+  // dart(端へ) → approach(奥→手前、拡大) → recede(手前→奥、A へ縮小) の 3 フェーズ。
   celebrate() {
     if (!this.canCelebrate()) return false;
     this._lastCelebrateAt = millis();
@@ -685,18 +684,23 @@ class GuestFish {
     this.popHomeY     = this.y;
     this.popBaseScale = this.scale;
 
-    // 巨大化サイズ (魚の長辺 px)。画面幅を超えないよう 98% で頭打ち。
-    const popLong = Math.min(GUEST_POP_LONG_PX, width * 0.98);
-    this.popScaleTarget = popLong / this._longest;
-    // 見切れないようクランプした端の表示位置。縦横それぞれ実寸の半分でクランプ
-    // (魚は横長なので縦半分は小さい)。画面より大きい軸はその軸の中央に置く。
-    const halfW = this.image.width  * this.popScaleTarget * 0.5;
-    const halfH = this.image.height * this.popScaleTarget * 0.5;
-    const clampC = (v, half, span) => (half * 2 >= span ? span / 2 : Math.max(half, Math.min(span - half, v)));
-    const goRight = this.x > width / 2;            // 近い側の横端へ寄せる
-    this.popTargetX = clampC(goRight ? (width - halfW) : halfW, halfW, width);
-    this.popTargetY = clampC(this.y, halfH, height);
+    // ダート先: 近い側の横端 (まだ小さいので現在サイズで見切れない位置)
+    const edgeMargin = Math.max(40, this._longest * this.scale * 0.5);
+    this.dartFromRight = this.x > width / 2;
+    this.dartX = this.dartFromRight ? (width - edgeMargin) : edgeMargin;
+    this.dartY = this.y;
+
+    // 手前ピーク: 画面の長辺 1/4 のサイズで画面センターに来る
+    const peakLong = Math.max(width, height) * GUEST_POP_FRAC;
+    this.popScaleTarget = peakLong / this._longest;
+    this.popCenterX = width / 2;
+    this.popCenterY = height / 2;
     return true;
+  }
+
+  // 手前 (うおちゃんより前のレイヤー) に描くべきか。approach/recede の間だけ true。
+  isPopFront() {
+    return this.popPhase === 'approach' || this.popPhase === 'recede';
   }
 
   // 「前面(大)グループ」に入るか:
@@ -748,48 +752,40 @@ class GuestFish {
     this.tilt += (this._targetTilt() - this.tilt) * GUEST_TILT_LERP;
   }
 
-  // お祝いポップの 4 フェーズ。millis() ベースで進行し、return 完了で popPhase=null に戻す。
+  // お祝いポップの 3 フェーズ。millis() ベースで進行し、recede 完了で popPhase=null に戻す。
   _updatePop() {
     const t = millis() - this.popStartedAt;
-    this._tailAmpMul = 1;
 
     if (this.popPhase === 'dart') {
-      // 素早く端へ。しっぽも少し速めに。
+      // 素早く端へ。サイズはまだ元のまま (奥にいる)。
       const p = Math.min(1, t / GUEST_POP_DART_MS);
       const e = _easeOutCubic(p);
-      this.x = lerp(this.popHomeX, this.popTargetX, e);
-      this.y = lerp(this.popHomeY, this.popTargetY, e);
-      this.facing = (this.popTargetX >= this.popHomeX) ? 1 : -1;
-      this.tailPhase += this.waveSpeed * 2.0;
-      if (p >= 1) { this.popPhase = 'grow'; this.popStartedAt = millis(); }
+      this.x = lerp(this.popHomeX, this.dartX, e);
+      this.y = lerp(this.popHomeY, this.dartY, e);
+      this.facing = this.dartFromRight ? 1 : -1;
+      this.tailPhase += this.waveSpeed * 2.2;
+      if (p >= 1) { this.popPhase = 'approach'; this.popStartedAt = millis(); }
 
-    } else if (this.popPhase === 'grow') {
-      // スーッと巨大化 (端の位置は維持)
-      const p = Math.min(1, t / GUEST_POP_GROW_MS);
-      this.scale = lerp(this.popBaseScale, this.popScaleTarget, _easeOutCubic(p));
-      this.x = this.popTargetX;
-      this.y = this.popTargetY;
-      this.tailPhase += this.waveSpeed * 1.5;
-      if (p >= 1) { this.scale = this.popScaleTarget; this.popPhase = 'shake'; this.popStartedAt = millis(); }
+    } else if (this.popPhase === 'approach') {
+      // 端 → センターへ泳ぎながら拡大 (水槽の奥から手前へ来る)。手前レイヤーで描画。
+      const p = Math.min(1, t / GUEST_POP_APPROACH_MS);
+      const e = _easeInOutCubic(p);
+      this.x = lerp(this.dartX, this.popCenterX, e);
+      this.y = lerp(this.dartY, this.popCenterY, e);
+      this.scale = lerp(this.popBaseScale, this.popScaleTarget, e);
+      this.facing = (this.popCenterX >= this.dartX) ? 1 : -1;
+      this.tailPhase += this.waveSpeed * 1.7;
+      if (p >= 1) { this.scale = this.popScaleTarget; this.popPhase = 'recede'; this.popStartedAt = millis(); }
 
-    } else if (this.popPhase === 'shake') {
-      // しっぽブルブル: 速度↑・振幅↑ + 左右に小刻みジッター
-      const p = Math.min(1, t / GUEST_POP_SHAKE_MS);
-      this.scale = this.popScaleTarget;
-      this.tailPhase += this.waveSpeed * GUEST_POP_SHAKE_TAIL;
-      this._tailAmpMul = GUEST_POP_SHAKE_AMP;
-      this.x = this.popTargetX + Math.sin(t * 0.06) * GUEST_POP_JITTER_PX;
-      this.y = this.popTargetY;
-      if (p >= 1) { this.popPhase = 'return'; this.popStartedAt = millis(); }
-
-    } else if (this.popPhase === 'return') {
-      // すーっと縮みながら元位置へ。サイズは現在の目標 (在席中なら A=big) へ。
-      const p = Math.min(1, t / GUEST_POP_RETURN_MS);
+    } else if (this.popPhase === 'recede') {
+      // センター → 奥 (元位置) へ泳ぎながら A サイズへ縮小 (手前から奥へ去る)。
+      const p = Math.min(1, t / GUEST_POP_RECEDE_MS);
       const e = _easeInOutCubic(p);
       this.scale = lerp(this.popScaleTarget, this._targetScale(), e);
-      this.x = lerp(this.popTargetX, this.popHomeX, e);
-      this.y = lerp(this.popTargetY, this.popHomeY, e);
-      this.tailPhase += this.waveSpeed * 1.5;
+      this.x = lerp(this.popCenterX, this.popHomeX, e);
+      this.y = lerp(this.popCenterY, this.popHomeY, e);
+      this.facing = (this.popHomeX >= this.popCenterX) ? 1 : -1;
+      this.tailPhase += this.waveSpeed * 1.4;
       if (p >= 1) {
         this.popPhase = null;
         this.scale = this._targetScale();

@@ -199,9 +199,11 @@ function draw() {
   //      手前: うおちゃん本体
   mainFish.update();
   for (const g of guestFishes) g.update();
-  for (const g of guestFishes) { if (!g.isBig()) g.draw(); }   // 奥
-  for (const g of guestFishes) { if (g.isBig()) g.draw(); }    // 中
-  mainFish.draw();                                              // 手前
+  for (const g of guestFishes) { if (!g.isBig() && !g.isPopFront()) g.draw(); }   // 奥
+  for (const g of guestFishes) { if (g.isBig()  && !g.isPopFront()) g.draw(); }   // 中
+  mainFish.draw();                                                                // うおちゃん
+  // お祝いポップで手前に来た魚はうおちゃんより前 (最前面) に描く
+  for (const g of guestFishes) { if (g.isPopFront()) g.draw(); }                  // 最手前
 
   // 6) 手前側の水草（魚より前に描いてパララックス感を出す）
   _drawPlants(false);
