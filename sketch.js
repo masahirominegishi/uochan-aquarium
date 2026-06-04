@@ -388,7 +388,14 @@ window.aquarium = {
         // payload.fish_ids に入っているものだけ前面化、それ以外は解除
         {
           const ids = new Set(payload.fish_ids || []);
+          // 「今 false→true に在席化する」魚 = 飼い主が今まさに現れたとみなせる魚
+          const newlyPresent = guestFishes.filter((g) => ids.has(g.id) && !g.isHighlighted);
           for (const g of guestFishes) g.setHighlighted(ids.has(g.id));
+          // 新規在席のうちクールダウン明けの 1 匹だけ「お祝いポップ」(複数登録ならランダム)
+          const eligible = newlyPresent.filter((g) => g.canCelebrate());
+          if (eligible.length > 0) {
+            eligible[Math.floor(Math.random() * eligible.length)].celebrate();
+          }
         }
         return;
       default:

@@ -559,6 +559,23 @@ const GUEST_NOTICE_TAIL    = 2.3;   // リアクション中のしっぽの速�
 const GUEST_NOTICE_SPEED   = 1.5;   // リアクション中の遊泳速度倍率 (近づいてくる感)
 const GUEST_NOTICE_BOB     = 1.8;   // リアクション中の上下ゆらぎ倍率 (はしゃぐ感)
 
+// 飼い主が現れた瞬間の「お祝いポップ」演出 (setOwnerPresent → celebrate())。
+// dart(端へ素早く) → grow(スーッと巨大化) → shake(しっぽブルブル) → return(縮みながら元位置へ)。
+// A サイズ (GUEST_SIZE_BIG) に落ち着く前にワンクッション挟む派手な歓迎。動きは速め。
+const GUEST_POP_FRAC       = 1 / 3;  // 巨大化サイズ = min(width,height) * これ (長辺 px)
+const GUEST_POP_COOLDOWN   = 10000;  // 同じ魚を再ポップさせない最小間隔 (ms)
+const GUEST_POP_DART_MS    = 200;    // 端へ素早くダート
+const GUEST_POP_GROW_MS    = 280;    // スーッと巨大化
+const GUEST_POP_SHAKE_MS   = 420;    // しっぽブルブル (巨大サイズ維持)
+const GUEST_POP_RETURN_MS  = 320;    // すーっと縮みながら元位置へ戻る
+const GUEST_POP_SHAKE_TAIL = 4.0;    // ブルブル中のしっぽ速度倍率
+const GUEST_POP_SHAKE_AMP  = 1.7;    // ブルブル中のしっぽ振幅倍率
+const GUEST_POP_JITTER_PX  = 6;      // ブルブル中の左右ジッター幅 (px)
+
+// イージング (p5 に無いので簡易版)
+function _easeOutCubic(p)  { const q = 1 - p; return 1 - q * q * q; }
+function _easeInOutCubic(p) { return p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2; }
+
 class GuestFish {
   constructor(image, options = {}) {
     this.image = image;                      // p5.Image (背景除去済)
@@ -574,6 +591,16 @@ class GuestFish {
     this.isHighlighted = false;     // 飼い主が水槽前にいるとき true
     this.highlightStartedAt = 0;
     this.excitedUntil = 0;          // 飼い主に気づいた瞬間からこの時刻まで「気づいたよ!」リアクション
+
+    // お祝いポップ演出の状態 (celebrate() で起動)
+    this.popPhase        = null;    // null | 'dart' | 'grow' | 'shake' | 'return'
+    this.popStartedAt    = 0;       // 現フェーズの開始 millis()
+    this._lastCelebrateAt = -1e9;   // 最後にポップした millis() (クールダウン判定)
+    this._tailAmpMul     = 1;       // しっぽ振幅倍率 (shake 中だけ上げる)
+    this.popHomeX = 0; this.popHomeY = 0;        // ポップ開始時の元位置
+    this.popTargetX = 0; this.popTargetY = 0;    // 端の表示位置 (見切れない範囲にクランプ)
+    this.popBaseScale = 0;          // grow 起点スケール
+    this.popScaleTarget = 0;        // 巨大化目標スケール
 
     // 入場演出:
     //  - dropIn:       今日新規登録された魚。上からドロップイン + 着水音 + その日ずっと big。
@@ -640,6 +667,34 @@ class GuestFish {
     }
   }
 
+  // クールダウン中 (直近 GUEST_POP_COOLDOWN 以内) かどうか。sketch 側の抽選で
+  // 「ポップできる魚」だけを候補にするために参照する。
+  canCelebrate() {
+    return !this.entering && this.popPhase === null
+        && (millis() - this._lastCelebrateAt) >= GUEST_POP_COOLDOWN;
+  }
+
+  // 飼い主が現れた瞬間の「お祝いポップ」を起動する (sketch 側で 1 匹だけ選んで呼ぶ)。
+  // dart → grow → shake → return の 4 フェーズ。起動できたら true。
+  celebrate() {
+    if (!this.canCelebrate()) return false;
+    this._lastCelebrateAt = millis();
+    this.popPhase     = 'dart';
+    this.popStartedAt = millis();
+    this.popHomeX     = this.x;
+    this.popHomeY     = this.y;
+    this.popBaseScale = this.scale;
+
+    // 巨大化サイズと、見切れないようクランプした端の表示位置
+    const popLong = Math.min(width, height) * GUEST_POP_FRAC;
+    const halfPop = popLong * 0.5;
+    this.popScaleTarget = popLong / this._longest;
+    const goRight = this.x > width / 2;            // 近い側の横端へ寄せる
+    this.popTargetX = goRight ? (width - halfPop) : halfPop;
+    this.popTargetY = Math.max(halfPop, Math.min(height - halfPop, this.y));
+    return true;
+  }
+
   // 「前面(大)グループ」に入るか:
   //  - 今日新しく入った魚 (dropIn) … その日はずっと前(大)のまま (ページ再読込=翌日の電源 ON でリセット)
   //  - 飼い主が水槽前にいる (isHighlighted)
@@ -664,6 +719,13 @@ class GuestFish {
   }
 
   update() {
+    // お祝いポップ中は専用の振り付けが位置・スケール・しっぽを支配する (通常遊泳は止める)
+    if (this.popPhase !== null) {
+      this._updatePop();
+      this.tilt += (this._targetTilt() - this.tilt) * GUEST_TILT_LERP;
+      return;
+    }
+
     const exciting = millis() < this.excitedUntil;   // 「気づいたよ!」リアクション中か
 
     // しっぽ・呼吸ゆらぎの位相 (リアクション中は速く＝はしゃぐ感)
@@ -680,6 +742,58 @@ class GuestFish {
     this.scale += (target - this.scale) * sizeLerp;
 
     this.tilt += (this._targetTilt() - this.tilt) * GUEST_TILT_LERP;
+  }
+
+  // お祝いポップの 4 フェーズ。millis() ベースで進行し、return 完了で popPhase=null に戻す。
+  _updatePop() {
+    const t = millis() - this.popStartedAt;
+    this._tailAmpMul = 1;
+
+    if (this.popPhase === 'dart') {
+      // 素早く端へ。しっぽも少し速めに。
+      const p = Math.min(1, t / GUEST_POP_DART_MS);
+      const e = _easeOutCubic(p);
+      this.x = lerp(this.popHomeX, this.popTargetX, e);
+      this.y = lerp(this.popHomeY, this.popTargetY, e);
+      this.facing = (this.popTargetX >= this.popHomeX) ? 1 : -1;
+      this.tailPhase += this.waveSpeed * 2.0;
+      if (p >= 1) { this.popPhase = 'grow'; this.popStartedAt = millis(); }
+
+    } else if (this.popPhase === 'grow') {
+      // スーッと巨大化 (端の位置は維持)
+      const p = Math.min(1, t / GUEST_POP_GROW_MS);
+      this.scale = lerp(this.popBaseScale, this.popScaleTarget, _easeOutCubic(p));
+      this.x = this.popTargetX;
+      this.y = this.popTargetY;
+      this.tailPhase += this.waveSpeed * 1.5;
+      if (p >= 1) { this.scale = this.popScaleTarget; this.popPhase = 'shake'; this.popStartedAt = millis(); }
+
+    } else if (this.popPhase === 'shake') {
+      // しっぽブルブル: 速度↑・振幅↑ + 左右に小刻みジッター
+      const p = Math.min(1, t / GUEST_POP_SHAKE_MS);
+      this.scale = this.popScaleTarget;
+      this.tailPhase += this.waveSpeed * GUEST_POP_SHAKE_TAIL;
+      this._tailAmpMul = GUEST_POP_SHAKE_AMP;
+      this.x = this.popTargetX + Math.sin(t * 0.06) * GUEST_POP_JITTER_PX;
+      this.y = this.popTargetY;
+      if (p >= 1) { this.popPhase = 'return'; this.popStartedAt = millis(); }
+
+    } else if (this.popPhase === 'return') {
+      // すーっと縮みながら元位置へ。サイズは現在の目標 (在席中なら A=big) へ。
+      const p = Math.min(1, t / GUEST_POP_RETURN_MS);
+      const e = _easeInOutCubic(p);
+      this.scale = lerp(this.popScaleTarget, this._targetScale(), e);
+      this.x = lerp(this.popTargetX, this.popHomeX, e);
+      this.y = lerp(this.popTargetY, this.popHomeY, e);
+      this.tailPhase += this.waveSpeed * 1.5;
+      if (p >= 1) {
+        this.popPhase = null;
+        this.scale = this._targetScale();
+        this.x = this.popHomeX;
+        this.y = this.popHomeY;
+        this.facing = this.vx >= 0 ? 1 : -1;   // 通常遊泳の向きへ戻す
+      }
+    }
   }
 
   _updateEntering() {
@@ -774,7 +888,7 @@ class GuestFish {
     const stripW = this.image.width / this.strips;
     for (let i = 0; i < this.strips; i++) {
       const t = i / (this.strips - 1);
-      const amp = lerp(this.waveAmpHead, this.waveAmpTail, t);
+      const amp = lerp(this.waveAmpHead, this.waveAmpTail, t) * this._tailAmpMul;
       const yOff = sin(this.tailPhase + t * PI * 1.6) * amp;
       const sx = i * stripW;
       const sw = stripW + 1;
