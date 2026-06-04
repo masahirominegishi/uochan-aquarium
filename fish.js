@@ -196,14 +196,13 @@ class Fish {
       case 'approach': return 1.6;
       case 'leave':    return 2.2;
       default: {
-        // 「泳いでいる時は常に進む」: 常時の前進ベースをしっかり確保し (サージ依存を減らす)、
-        // ひと休み中もはっきり前進する。キックの加速サージは残すが控えめにして連続的な遊泳感に。
-        if (this.idleRestUntil > 0) return 2.5;             // ひと休み中もはっきり前進 (旧 0.04→0.6→2.5)
-        // キックは p2→p3 の区切りの頭 (cyclePhase = this.swimKickPhase)。
-        // 常時 2.5 のクルーズ + キックで控えめサージ。止まる瞬間を作らない。
+        // 原型のキック推進 (= Mac で見ている「手足のキックでグイッと進む」感) を維持。
+        // キックの瞬間に大きく前進 → 合間はすーっと減速、という平泳ぎリズム。
+        // 唯一の修正: ひと休み中の dead stop (旧 0.04) だけ解消し、止まらずゆっくり漂わせる。
+        if (this.idleRestUntil > 0) return 1.5;             // ひと休み中も完全停止しない (旧 0.04)
         const sinceKick = ((this.cyclePhase - this.swimKickPhase) % 1 + 1) % 1; // 0 = 蹴った直後
         const t = Math.max(0, 1 - sinceKick / 0.5);
-        return 2.5 + 16 * Math.pow(t, 2.6);
+        return 0.05 + 48 * Math.pow(t, 2.6);               // キックでグイッと前進 (原型のサージ)
       }
     }
   }
