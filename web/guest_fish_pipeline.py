@@ -312,6 +312,38 @@ def _keep_main_blob(mask: np.ndarray, near_px: int) -> np.ndarray:
     return np.isin(labels, keep_labels)
 
 
+def _drop_border_frame(ink: np.ndarray, *, border_px: int = 4, center_frac: float = 0.5) -> np.ndarray:
+    """紙の縁・ブース枠が「インク」として拾われた外周の帯/リング成分を除去する。
+
+    crop_to_paper の後でも四隅/縁に残る暗いビネット・ボックスのフチは、背景差分で
+    インク扱いされ、画像の外周をぐるりと囲う連結成分になる。これを fill_holes すると
+    リングの内側 (= 魚の外の紙) まで丸ごと塗り潰され、魚の何倍もの白ハロになる
+    (本番で輪郭線スタイルの絵が「紙ごと残る」失敗の主因)。魚は crop で必ず中央に来るので
+    「画像の縁 (border_px 以内) に接し、かつ中央 center_frac の矩形に画素を持たない」成分
+    だけを枠とみなして落とす。紙いっぱいに大きく描いた魚 (縁に接する) は中央にも画素を
+    持つので残る。判定は bbox ではなく実画素で行う (枠の bbox は中央と重なるため)。
+    """
+    from scipy import ndimage
+    lbl, n = ndimage.label(ink)
+    if n <= 1:
+        return ink
+    h, w = ink.shape
+    border = np.zeros(ink.shape, dtype=bool)
+    border[:border_px, :] = border[-border_px:, :] = border[:, :border_px] = border[:, -border_px:] = True
+    border_labels = set(int(v) for v in np.unique(lbl[border & (lbl > 0)])) - {0}
+    if not border_labels:
+        return ink
+    cy0, cy1 = int(h * (0.5 - center_frac / 2)), int(h * (0.5 + center_frac / 2))
+    cx0, cx1 = int(w * (0.5 - center_frac / 2)), int(w * (0.5 + center_frac / 2))
+    center = np.zeros(ink.shape, dtype=bool)
+    center[cy0:cy1, cx0:cx1] = True
+    center_labels = set(int(v) for v in np.unique(lbl[center & (lbl > 0)])) - {0}
+    frame = border_labels - center_labels      # 縁に接するが中央に届かない = 枠/紙縁
+    if not frame:
+        return ink
+    return ink & ~np.isin(lbl, list(frame))
+
+
 def compute_silhouette(rgb: np.ndarray, *, v_thresh: int, s_thresh: int, close_px: int) -> np.ndarray:
     """魚の「中身まで埋めた」シルエットの bool マスクを返す (teamLab Sketch Aquarium 風)。
 
@@ -512,6 +544,7 @@ def fish_mask(rgb: np.ndarray, *, ink_thresh: int, bg_blur: int = 0, close_px: i
     """
     from scipy import ndimage
     ink = ink_mask(rgb, thresh=ink_thresh, blur=bg_blur)
+    ink = _drop_border_frame(ink)         # 紙の縁/ブース枠の外周インクを除去 (fill_holes の暴発=紙ごとハロ化を防ぐ)
     k = max(0, int(close_px))
     if k > 0:
         bridged = _bridge_endpoint_gaps(ink, max_gap=2 * k)            # 隙間を直線で閉じる (太らせない)
