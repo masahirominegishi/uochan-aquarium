@@ -18,46 +18,6 @@
     canvas {
       display: block;
     }
-    /* フルスクリーン誘導ボタン（最初の1クリックでブラウザにフルスクリーン化を依頼） */
-    #fs-btn {
-      position: fixed;
-      right: 12px;
-      bottom: 12px;
-      padding: 8px 12px;
-      font-size: 12px;
-      color: #fff;
-      background: rgba(0,0,0,0.4);
-      border: 1px solid rgba(255,255,255,0.4);
-      border-radius: 6px;
-      cursor: pointer;
-      z-index: 10;
-      font-family: sans-serif;
-    }
-    #fs-btn:hover { background: rgba(0,0,0,0.7); }
-    /* テストパネル: 状態切替ボタン群。? キーで表示/非表示トグル */
-    #test-panel {
-      position: fixed;
-      right: 12px;
-      bottom: 56px;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      z-index: 10;
-      font-family: sans-serif;
-    }
-    #test-panel button {
-      padding: 6px 10px;
-      font-size: 12px;
-      color: #fff;
-      background: rgba(0,0,0,0.4);
-      border: 1px solid rgba(255,255,255,0.4);
-      border-radius: 6px;
-      cursor: pointer;
-      min-width: 110px;
-      text-align: left;
-    }
-    #test-panel button:hover { background: rgba(0,0,0,0.7); }
-    #test-panel.hidden { display: none; }
   </style>
 </head>
 <body>
@@ -69,26 +29,5 @@
   <script src="sketch.js"></script>
   <!-- pi-main 上のブリッジ (uochan-aquarium.service) と接続して onEvent を駆動 -->
   <script src="ws-client.js"></script>
-
-  <!-- テスト用ボタン群（? キーで表示/非表示トグル） -->
-  <div id="test-panel">
-    <button onclick="aquarium.test('idle')">😐 idle (泳ぐ)</button>
-    <button onclick="aquarium.test('ai_speak_start')">💬 話す (talk+口パク)</button>
-    <button onclick="aquarium.test('ai_speak_end')">🤐 話し終わり (余韻5秒→泳ぐ)</button>
-    <button onclick="aquarium.test('sleep')">😴 sleep (寝る)</button>
-    <button onclick="aquarium.testAddGuest()">🐟 +guest fish</button>
-  </div>
-
-  <!-- フルスクリーン化ボタン（ブラウザの仕様で「ユーザー操作」が必要なため） -->
-  <button id="fs-btn" onclick="document.documentElement.requestFullscreen()">⛶ フルスクリーン</button>
-
-  <script>
-    // ? キーでテストパネルの表示/非表示をトグル
-    document.addEventListener('keydown', (e) => {
-      if (e.key === '?') {
-        document.getElementById('test-panel').classList.toggle('hidden');
-      }
-    });
-  </script>
 </body>
 </html>
