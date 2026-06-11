@@ -14,6 +14,11 @@
 //   - 座標系：左上が (0, 0)、右下が (width, height)
 // =============================================================
 
+// ---- 機能トグル ----
+// 顔認証済みの飼い主が水槽前に来たとき、その人の魚を前面化/拡大/お祝いポップする機能。
+// 2026-06-11 一時オフ (顔認証を止めている間)。戻すときは true。
+const OWNER_HIGHLIGHT_ENABLED = false;
+
 // ---- グローバル変数 ----
 let mainFish;        // うおちゃん本体 (Fish インスタンス)
 let guestFishes = [];// お客さんがアップロードした魚 (GuestFish インスタンスの配列)
@@ -394,6 +399,7 @@ window.aquarium = {
       case 'fish_owner_present':
         // Phase 1.5: 飼い主候補が水槽前に来た / いなくなった
         // payload.fish_ids に入っているものだけ前面化、それ以外は解除
+        if (!OWNER_HIGHLIGHT_ENABLED) return;   // 2026-06-11 一時オフ (顔認証停止中)
         {
           const ids = new Set(payload.fish_ids || []);
           // 「今 false→true に在席化する」魚 = 飼い主が今まさに現れたとみなせる魚
