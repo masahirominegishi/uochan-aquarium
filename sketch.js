@@ -198,7 +198,7 @@ function draw() {
   //      中  : 飼い主在席 / 今日新しく入った大きいゲスト魚
   //      手前: うおちゃん本体
   mainFish.update();
-  for (const g of guestFishes) g.update();
+  for (const g of guestFishes) g.update(guestFishes);   // 配列を渡してセパレーション(分離)を効かせる
   for (const g of guestFishes) { if (!g.isBig() && !g.isPopFront()) g.draw(); }   // 奥
   for (const g of guestFishes) { if (g.isBig()  && !g.isPopFront()) g.draw(); }   // 中
   mainFish.draw();                                                                // うおちゃん

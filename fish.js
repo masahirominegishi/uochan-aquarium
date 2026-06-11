@@ -548,6 +548,19 @@ const GUEST_TILT_MAX_DEG = 15;     // 進行方向への傾き上限 (兼: 上�
 const GUEST_TILT_LERP    = 0.12;   // 傾きの補間係数
 const GUEST_TURN_MIN_SEC = 2.5;    // 進行角を変える間隔の下限
 const GUEST_TURN_MAX_SEC = 6.0;    // 〃 上限
+
+// --- 「塊にならず散らばって泳ぐ」ための調整 (2026-06-11) -----------------
+// A. セパレーション: 近くの魚から穏やかに離れる微小な力 (塊を直接ほどく主軸)
+const GUEST_SEP_RADIUS   = 150;    // この距離(px)より近い相手から離れようとする
+const GUEST_SEP_FORCE    = 0.045;  // 1 フレームに vx/vy へ足す反発の強さ (控えめ)
+const GUEST_SEP_VMAX     = 1.25;   // セパレーションで増えうる速度の上限 (暴走防止)
+// B. ターン時にたまに水平の向きも反転 (レーン化を防ぐ)
+const GUEST_TURN_FLIP_P  = 0.22;   // ターンのうちこの確率で左右の向きを反転
+// C. 上下に使う範囲: 見た目の傾きは ±GUEST_TILT_MAX_DEG のまま、移動の縦成分だけ少し広げる
+const GUEST_TURN_VY_MAX  = 0.45;   // ターンで入れる縦速度の上限 (px/frame 目安)
+// D. 壁反射のジッター + 速度の個体差拡大 (同期崩し)
+const GUEST_BOUNCE_JITTER = 0.18;  // 壁反射時に向きへ加える乱れ (rad 目安)
+// ----------------------------------------------------------------------
 const GUEST_DROP_VY0     = 2.2;    // 落下開始時の下向き初速
 const GUEST_DROP_GRAVITY = 0.42;   // 落下中の加速度
 const GUEST_RIPPLE_SEC   = 0.85;   // 着水波紋の表示時間
@@ -631,7 +644,7 @@ class GuestFish {
     } else {
       this.x  = options.x !== undefined ? options.x : random(width * 0.2, width * 0.8);
       this.y  = options.y !== undefined ? options.y : random(height * 0.25, height * 0.7);
-      const speed = options.speed || random(0.4, 0.85);
+      const speed = options.speed || random(0.35, 1.0);   // D: 個体差を少し広げて同期を崩す
       this.vx = (random() < 0.5 ? -1 : 1) * speed;
       this.vy = 0;
       this.scale = this.smallScale;
@@ -732,7 +745,7 @@ class GuestFish {
     return (this.facing >= 0) ? pitch : -pitch;
   }
 
-  update() {
+  update(neighbors = null) {
     // お祝いポップ中は専用の振り付けが位置・スケール・しっぽを支配する (通常遊泳は止める)
     if (this.popPhase !== null) {
       this._updatePop();
@@ -747,7 +760,7 @@ class GuestFish {
     this.bobPhase  += 0.02 * (exciting ? 1.7 : 1.0);
 
     if (this.entering) this._updateEntering();
-    else               this._updateSwim(exciting);
+    else               this._updateSwim(exciting, neighbors);
 
     // 表示スケール: 飼い主に気づいて大きくなる途中だけゆっくり (急拡大しない)、それ以外は通常速度
     const target = this._targetScale();
@@ -849,15 +862,40 @@ class GuestFish {
     }
   }
 
-  _updateSwim(exciting = false) {
-    // たまに進行角を変える (水平の向きは維持、上下成分を ±GUEST_TILT_MAX_DEG の範囲で入れる)
+  _updateSwim(exciting = false, neighbors = null) {
+    // B/C: たまに進行角を変える。低確率で水平の向きも反転 (レーン化を防ぐ)、
+    //      縦成分は ±GUEST_TURN_VY_MAX まで少し広めに取り、横はその分を残して速度を保つ。
     if (millis() >= this.nextTurnAt) {
-      const maxR = (GUEST_TILT_MAX_DEG * Math.PI) / 180;
-      const ang  = random(-maxR, maxR);
-      const spd  = Math.max(0.35, Math.hypot(this.vx, this.vy));
-      this.vx = this.facing * spd * Math.cos(ang);
-      this.vy = spd * Math.sin(ang);
+      const spd = Math.max(0.35, Math.hypot(this.vx, this.vy));
+      if (random() < GUEST_TURN_FLIP_P) this.facing = -this.facing;   // B
+      const vy = random(-GUEST_TURN_VY_MAX, GUEST_TURN_VY_MAX);       // C
+      const vx = Math.sqrt(Math.max(0.0144, spd * spd - vy * vy));    // 0.0144 = 0.12^2 (最低横速)
+      this.vx = this.facing * vx;
+      this.vy = vy;
       this.nextTurnAt = millis() + random(GUEST_TURN_MIN_SEC, GUEST_TURN_MAX_SEC) * 1000;
+    }
+
+    // A: セパレーション — 近くの魚から穏やかに離れる (塊を直接ほどく主軸)。
+    if (neighbors) {
+      let sx = 0, sy = 0;
+      const r2 = GUEST_SEP_RADIUS * GUEST_SEP_RADIUS;
+      for (const other of neighbors) {
+        if (other === this || other.entering || other.popPhase !== null) continue;
+        const dx = this.x - other.x, dy = this.y - other.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > 0.01 && d2 < r2) {
+          const d = Math.sqrt(d2);
+          const w = (1 - d / GUEST_SEP_RADIUS) / d;   // 近いほど強く、方向は正規化
+          sx += dx * w; sy += dy * w;
+        }
+      }
+      this.vx += sx * GUEST_SEP_FORCE;
+      this.vy += sy * GUEST_SEP_FORCE;
+      // 離れる方向へ実際に向きを変える (速度が十分なら facing を vx に合わせる)
+      if (Math.abs(this.vx) > 0.02) this.facing = this.vx >= 0 ? 1 : -1;
+      // 速度上限でクランプ (暴走防止)
+      const sp = Math.hypot(this.vx, this.vy);
+      if (sp > GUEST_SEP_VMAX) { this.vx *= GUEST_SEP_VMAX / sp; this.vy *= GUEST_SEP_VMAX / sp; }
     }
 
     // 「気づいたよ!」リアクション中は速く動き (近づいてくる感)、上下のゆらぎも大きく (はしゃぐ感)
@@ -866,12 +904,22 @@ class GuestFish {
     this.x += this.vx * spdMul;
     this.y += this.vy * spdMul + sin(this.bobPhase) * 0.25 * bobMul;
 
-    // 壁で反射
+    // 壁で反射 (D: 反射時に向きへ微小なジッターを足して同期を崩す)
     const half = this._longest * this.scale * 0.5;
-    if (this.x < half && this.vx < 0)            { this.vx = Math.abs(this.vx);  this.facing = 1; }
-    if (this.x > width - half && this.vx > 0)    { this.vx = -Math.abs(this.vx); this.facing = -1; }
-    if (this.y < half && this.vy < 0)            { this.vy = Math.abs(this.vy); }
-    if (this.y > height - half && this.vy > 0)   { this.vy = -Math.abs(this.vy); }
+    if (this.x < half && this.vx < 0)            { this.vx = Math.abs(this.vx);  this.facing = 1;  this._bounceJitter(); }
+    if (this.x > width - half && this.vx > 0)    { this.vx = -Math.abs(this.vx); this.facing = -1; this._bounceJitter(); }
+    if (this.y < half && this.vy < 0)            { this.vy = Math.abs(this.vy);  this._bounceJitter(); }
+    if (this.y > height - half && this.vy > 0)   { this.vy = -Math.abs(this.vy); this._bounceJitter(); }
+  }
+
+  // D: 壁反射時に速度ベクトルを小さくランダム回転させ、揃った折り返しをばらす。
+  _bounceJitter() {
+    const a = random(-GUEST_BOUNCE_JITTER, GUEST_BOUNCE_JITTER);
+    const ca = Math.cos(a), sa = Math.sin(a);
+    const vx = this.vx * ca - this.vy * sa;
+    const vy = this.vx * sa + this.vy * ca;
+    this.vx = vx; this.vy = vy;
+    if (Math.abs(this.vx) > 0.02) this.facing = this.vx >= 0 ? 1 : -1;
   }
 
   draw() {
