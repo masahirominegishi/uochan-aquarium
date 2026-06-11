@@ -541,8 +541,10 @@ class Fish {
 // =============================================================
 
 // チューニング用定数
-const GUEST_SIZE_SMALL   = 130;    // 飼い主不在 / 未登録のときの長辺 px
-const GUEST_SIZE_BIG     = 210;    // 飼い主在席 / 新規登録の落下中のときの長辺 px (旧 260 → ~0.8x)
+const GUEST_SIZE_SMALL   = 130;    // 当日以外のゲスト魚の長辺 px
+const GUEST_SIZE_TODAY   = 200;    // 入れた当日の魚の長辺 px (他の魚 130 より少し大きめ)
+const GUEST_SIZE_TANK_PRESENT = 300;   // 水槽前に人がいる(ToF on / approach)とき、当日の魚をここまで拡大
+const GUEST_TANK_GROW_LERP    = 0.025; // 当日の魚を 380⇄460 で伸縮する補間係数 (~2秒で到達 @60fps)
 const GUEST_SIZE_LERP    = 0.12;   // 1 フレームのサイズ補間係数 (~0.4s で到達 @60fps)
 const GUEST_TILT_MAX_DEG = 15;     // 進行方向への傾き上限 (兼: 上下動の角度上限)
 const GUEST_TILT_LERP    = 0.12;   // 傾きの補間係数
@@ -592,6 +594,14 @@ const GUEST_POP_ARC        = 170;    // approach/recede を弧状にする下向
 function _easeOutCubic(p)  { const q = 1 - p; return 1 - q * q * q; }
 function _easeInOutCubic(p) { return p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2; }
 
+// 今日のローカル日付を "YYYYMMDD" で返す (ゲスト魚 ID 先頭の日付と突き合わせる用)
+function _ymdToday() {
+  const d = new Date();
+  const mo = `${d.getMonth() + 1}`.padStart(2, '0');
+  const da = `${d.getDate()}`.padStart(2, '0');
+  return `${d.getFullYear()}${mo}${da}`;
+}
+
 class GuestFish {
   constructor(image, options = {}) {
     this.image = image;                      // p5.Image (背景除去済)
@@ -600,7 +610,8 @@ class GuestFish {
     // 表示サイズ: 長辺基準で small / big の 2 段。実描画スケールはその間を毎フレーム lerp。
     this._longest   = Math.max(image.width, image.height);
     this.smallScale = (options.smallSize || GUEST_SIZE_SMALL) / this._longest;
-    this.bigScale   = (options.bigSize   || GUEST_SIZE_BIG)   / this._longest;
+    this.todayScale = (options.todaySize || GUEST_SIZE_TODAY) / this._longest;
+    this.tankPresentScale = (options.tankPresentSize || GUEST_SIZE_TANK_PRESENT) / this._longest;
 
     // 飼い主登録
     this.ownerPersonId = options.ownerPersonId !== undefined ? options.ownerPersonId : null;
@@ -637,7 +648,7 @@ class GuestFish {
     if (this.entering) {
       this.x  = options.x !== undefined ? options.x : random(width * 0.15, width * 0.85);
       // 入場開始時のサイズ: 新規登録は big、起動時の既存魚は通常 (= 飼い主不在なら small)
-      this.scale = this.dropIn ? this.bigScale : this.smallScale;
+      this.scale = this.isToday() ? this.todayScale : this.smallScale;
       this.y  = -this._longest * this.scale * 0.7;            // 画面上端より上から落とす
       this.vx = (random() < 0.5 ? -1 : 1) * random(0.35, 0.7);  // 着水後に使う水平速度
       this.vy = GUEST_DROP_VY0;
@@ -722,17 +733,21 @@ class GuestFish {
     return this.popPhase === 'approach' || this.popPhase === 'hold' || this.popPhase === 'recede';
   }
 
-  // 「前面(大)グループ」に入るか:
-  //  - 今日新しく入った魚 (dropIn) … その日はずっと前(大)のまま (ページ再読込=翌日の電源 ON でリセット)
-  //  - 飼い主が水槽前にいる (isHighlighted)
-  // それ以外は「奥(小)グループ」。起動時の既存魚のドロップイン (startupEntry) は通常サイズ・通常レイヤー。
-  isBig() {
-    return this.dropIn || this.isHighlighted;
+  // 入れた当日の魚か。ゲスト魚 ID は "YYYYMMDD_HHMMSS_hash" 形式なので、先頭日付が
+  // 今日なら当日扱い (リロードしても判定が残り、日付が変われば自動で外れる)。
+  // ID が日付形式でないもの (テスト等) はライブ追加 (dropIn) を当日扱いにフォールバック。
+  // 当日の魚 = 他の魚より前のレイヤーに、大きめ (todayScale)、ToF 在席で 460 へ。
+  isToday() {
+    const m = /^(\d{8})_/.exec(this.id || '');
+    return m ? (m[1] === _ymdToday()) : this.dropIn;
   }
 
-  // いま目指す表示スケール
-  _targetScale() {
-    return this.isBig() ? this.bigScale : this.smallScale;
+  // いま目指す表示スケール:
+  //  当日の魚 (dropIn) … 人が水槽前(ToF on)なら うおちゃん大(tankPresentScale)、いなければ todayScale。
+  //  それ以外 … 小。
+  _targetScale(personAtTank = false) {
+    if (this.isToday()) return personAtTank ? this.tankPresentScale : this.todayScale;
+    return this.smallScale;
   }
 
   // 進行方向に応じた目標傾き (rad)。
@@ -745,7 +760,7 @@ class GuestFish {
     return (this.facing >= 0) ? pitch : -pitch;
   }
 
-  update(neighbors = null) {
+  update(neighbors = null, personAtTank = false) {
     // お祝いポップ中は専用の振り付けが位置・スケール・しっぽを支配する (通常遊泳は止める)
     if (this.popPhase !== null) {
       this._updatePop();
@@ -762,10 +777,9 @@ class GuestFish {
     if (this.entering) this._updateEntering();
     else               this._updateSwim(exciting, neighbors);
 
-    // 表示スケール: 飼い主に気づいて大きくなる途中だけゆっくり (急拡大しない)、それ以外は通常速度
-    const target = this._targetScale();
-    const noticingGrow = this.isHighlighted && !this.entering && (target - this.scale) > 0.0001;
-    const sizeLerp = noticingGrow ? GUEST_GROW_LERP_SLOW : GUEST_SIZE_LERP;
+    // 表示スケール: 当日の魚は ToF (人が水槽前) で 380⇄460 をゆっくり (~2秒) 伸縮、それ以外は通常速度。
+    const target = this._targetScale(personAtTank);
+    const sizeLerp = this.isToday() ? GUEST_TANK_GROW_LERP : GUEST_SIZE_LERP;
     this.scale += (target - this.scale) * sizeLerp;
 
     this.tilt += (this._targetTilt() - this.tilt) * GUEST_TILT_LERP;
@@ -928,7 +942,7 @@ class GuestFish {
       const dt = (millis() - this.splashedAt) / 1000;
       if (dt >= 0 && dt < GUEST_RIPPLE_SEC) {
         const p    = dt / GUEST_RIPPLE_SEC;
-        const rMax = this._longest * this.bigScale * 0.9;
+        const rMax = this._longest * this.scale * 0.9;   // 着水した魚の実サイズに合わせた波紋
         const r    = lerp(10, rMax, p);
         const a    = (1 - p) * 130;
         push();

@@ -199,14 +199,14 @@ function draw() {
   }
 
   // 5) 魚を更新 → 描画。レイヤー (奥→手前):
-  //      奥  : 飼い主不在 / 未登録の小さいゲスト魚
-  //      中  : 飼い主在席 / 今日新しく入った大きいゲスト魚
+  //      奥  : 当日以外のゲスト魚 (小)
+  //      中  : 入れた当日の魚 (dropIn、中間サイズ) … 他のゲスト魚より前・うおちゃんより後ろ
   //      手前: うおちゃん本体
   mainFish.update();
-  for (const g of guestFishes) g.update(guestFishes);   // 配列を渡してセパレーション(分離)を効かせる
-  for (const g of guestFishes) { if (!g.isBig() && !g.isPopFront()) g.draw(); }   // 奥
-  for (const g of guestFishes) { if (g.isBig()  && !g.isPopFront()) g.draw(); }   // 中
-  mainFish.draw();                                                                // うおちゃん
+  for (const g of guestFishes) g.update(guestFishes, _personAtTank);   // 分離 + ToF在席で当日魚を拡大
+  for (const g of guestFishes) { if (!g.isToday() && !g.isPopFront()) g.draw(); }   // 奥: 当日以外
+  for (const g of guestFishes) { if (g.isToday()  && !g.isPopFront()) g.draw(); }   // 中: 当日の魚 (他より前)
+  mainFish.draw();                                                                  // うおちゃん
   // お祝いポップで手前に来た魚はうおちゃんより前 (最前面) に描く
   for (const g of guestFishes) { if (g.isPopFront()) g.draw(); }                  // 最手前
 
@@ -338,6 +338,7 @@ function windowResized() {
 // (talk セットのまま・口は閉じる) で会話モードのまま待機させてから zone 状態へ戻す。
 // =============================================================
 let _zoneState = 'idle';   // zone 系の最新状態 (approach/speak/leave/idle)
+let _personAtTank = false; // 水槽前に人がいるか (ToF on = approach / off = leave/idle/sleep)。当日の魚の拡大に使用
 let _aiSpeaking = false;   // AI 発話中か
 let _aiLingerUntil = 0;    // ai_speak_end の後、この millis() まで 'attentive' (口を閉じて会話モードのまま待機)
 const AI_LINGER_MS = 5000; // ↑ 余韻の長さ。話し終わってから泳ぎに戻すまでの間 (ms)。
@@ -357,11 +358,13 @@ window.aquarium = {
     switch (type) {
       case 'approach':
         _zoneState = type;
+        _personAtTank = true;                     // ToF on: 人が水槽前 → 当日の魚をうおちゃん大へ拡大
         break;
       case 'leave':
       case 'idle':
       case 'sleep':
         _zoneState = type;
+        _personAtTank = false;                    // ToF off: 当日の魚を通常サイズへ戻す
         _conversationActive = false;              // 客が水槽前から離れた → 会話モード解除 (泳ぎ復帰)
         break;
       case 'speak':
