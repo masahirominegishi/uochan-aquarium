@@ -19,6 +19,24 @@
 // 2026-06-11 一時オフ (顔認証を止めている間)。戻すときは true。
 const OWNER_HIGHLIGHT_ENABLED = false;
 
+// ---- 2画面構成 (2026-07-10) ----
+// ?tank=main : 65吋の大水槽。ゲスト魚が泳ぐ。うおちゃんの定位置。
+// ?tank=sub  : 右の小さい水槽。ゲスト魚なし (空の水槽)。ToF on のとき、うおちゃんだけが
+//              大水槽から素早く渡ってきて、ここで話す。
+// クエリなし = main (単独運用・開発時のデフォルト)。
+const TANK    = new URLSearchParams(location.search).get('tank') || 'main';
+const IS_MAIN = TANK !== 'sub';
+
+// 物理配置: 65吋が左、サブが右。よって「右へ抜ける = 大水槽から出ていく」。
+// 大水槽 → サブ: main が右(+1)へ抜け、少し遅れて sub が左(+1)から入る。
+// サブ → 大水槽: sub が左(-1)へ抜け、少し遅れて main が右(-1)から入る。
+const HANDOFF_DELAY_MS = 150;    // 出ていく画面と入ってくる画面のずれ (渡っている感)
+// 客が離れてもすぐには帰らない。しばらくサブでのんびり泳がせてから大水槽へ戻る。
+// 途中で再び ToF on になれば帰還はキャンセル (行ったり来たりの防止も兼ねる)。
+const RETURN_DELAY_MS  = 60000;
+let _returnTimer  = null;
+let _handoffTimer = null;
+
 // ---- グローバル変数 ----
 let mainFish;        // うおちゃん本体 (Fish インスタンス)
 let guestFishes = [];// お客さんがアップロードした魚 (GuestFish インスタンスの配列)
@@ -113,6 +131,8 @@ function setup() {
 
   // パーツリギングでうおちゃん本体を作成 (swim / talk 2セット)
   mainFish = new Fish(rig, { swim: swimImgs, talk: talkImgs });
+  // うおちゃんの定位置は大水槽。サブは客が来るまで空っぽ。
+  if (!IS_MAIN) mainFish.presence = 'away';
 
   // 気泡を初期配置（最初から画面に少しある状態にしたい）
   for (let i = 0; i < 12; i++) {
@@ -352,6 +372,49 @@ let _conversationActive = false;
 const OWNER_CELEBRATE_COOLDOWN_MS = 8000;
 let _lastOwnerCelebrateAt = -1e9;
 
+// -------------------------------------------------------------
+// 2画面またぎ: うおちゃんの移動
+// -------------------------------------------------------------
+// ToF on。大水槽から出ていき、サブに現れる。発話は待たせない (移動と並行して喋り出す)。
+// approach は客が水槽前に居る間くり返し飛んでくるので、多重発火に耐える必要がある
+// (dashIn/dashOut 側にも「既に居る/居ない」のガードがある)。
+function _uochanComeToSub() {
+  _cancelReturn();
+  if (IS_MAIN) {
+    mainFish.dashOut(+1);                                              // 右へ抜ける
+  } else if (mainFish.isAway()) {
+    _cancelHandoff();
+    _handoffTimer = setTimeout(() => {
+      _handoffTimer = null;
+      mainFish.dashIn(+1);                                             // 左から入ってくる
+    }, HANDOFF_DELAY_MS);
+  }
+}
+
+// ToF off。RETURN_DELAY_MS 後に大水槽へ帰す。それまではサブでのんびり泳いでいる。
+function _scheduleReturn() {
+  if (_returnTimer) return;        // 既に帰り支度中: leave/idle の連投でタイマーを伸ばさない
+  _cancelHandoff();
+  _returnTimer = setTimeout(() => {
+    _returnTimer = null;
+    if (IS_MAIN) {
+      _handoffTimer = setTimeout(() => {
+        _handoffTimer = null;
+        mainFish.dashIn(-1);                                           // 右から入ってくる
+      }, HANDOFF_DELAY_MS);
+    } else {
+      mainFish.dashOut(-1);                                            // 左へ抜ける
+    }
+  }, RETURN_DELAY_MS);
+}
+
+function _cancelReturn() {
+  if (_returnTimer) { clearTimeout(_returnTimer); _returnTimer = null; }
+}
+function _cancelHandoff() {
+  if (_handoffTimer) { clearTimeout(_handoffTimer); _handoffTimer = null; }
+}
+
 window.aquarium = {
   onEvent(type, payload = {}) {
     console.log('[aquarium] event:', type, payload);
@@ -359,6 +422,7 @@ window.aquarium = {
       case 'approach':
         _zoneState = type;
         _personAtTank = true;                     // ToF on: 人が水槽前 → 当日の魚をうおちゃん大へ拡大
+        _uochanComeToSub();                       // うおちゃんは大水槽 → サブへ素早く移動
         break;
       case 'leave':
       case 'idle':
@@ -366,6 +430,7 @@ window.aquarium = {
         _zoneState = type;
         _personAtTank = false;                    // ToF off: 当日の魚を通常サイズへ戻す
         _conversationActive = false;              // 客が水槽前から離れた → 会話モード解除 (泳ぎ復帰)
+        _scheduleReturn();                        // しばらくしたら大水槽へ帰る
         break;
       case 'speak':
         // zone 由来 speak (5秒滞在で発火) は無視。口パク同期は AI 由来 (ai_speak_start) が担当する。
@@ -445,6 +510,7 @@ window.aquarium = {
   // ゲスト魚を追加 (ws-client.js から呼ばれる)
   // imageUrl から非同期に画像を読み込み、GuestFish として guestFishes 配列に push
   addGuestFish(imageUrl, options = {}) {
+    if (!IS_MAIN) return;   // サブは「空の水槽」: ゲスト魚は大水槽にだけ棲む
     // 同じ id が既に居る / キューに居る → 追加せず ownerPersonId だけ更新 (welcome 多重防止)
     if (options.id) {
       const existing = guestFishes.find((g) => g.id === options.id);

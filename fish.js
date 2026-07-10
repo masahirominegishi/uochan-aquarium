@@ -55,6 +55,11 @@ const FISH_TILT_LERP    = 0.12;  // 傾きの補間係数
 const FISH_TURN_MIN_SEC = 2.5;   // 進行角を変える間隔の下限
 const FISH_TURN_MAX_SEC = 6.0;   // 〃 上限
 
+// 2画面またぎの移動 (大水槽 ⇄ 右の水槽)。ToF on で右へ、離席してしばらく経つと大水槽へ帰る。
+// 「分からないくらい速く」渡らせたいので既定 200ms。画面外に出るまで壁反射を無効化する。
+const DASH_MS = 200;
+const DASH_MARGIN = 40;          // 画面外へ何 px 余分に抜けるか (体が完全に隠れるまで)
+
 class Fish {
   // rig:    rig.json の中身 ({ swim:{...}, talk:{...} })
   // images: { swim: { name -> p5.Image }, talk: { name -> p5.Image } }
@@ -131,6 +136,67 @@ class Fish {
     this.lastBlinkAt = millis();
     this.nextBlinkInterval = random(3.0, 7.0);
     this.blinkProgress = -1;        // -1 = 開、0..1 = 瞬き中
+
+    // 2画面またぎ: この画面に居るか。'away' の間は update/draw とも何もしない (もう一方の画面に居る)
+    this.presence = 'here';
+    this._transit = null;           // { mode:'out'|'in', fromX, toX, startAt, durMs } 移動中だけ非 null
+  }
+
+  // -----------------------------------------------------------
+  // 2画面またぎの移動
+  // -----------------------------------------------------------
+  // 壁反射に使う半幅/半高 (swim/talk の大きい方で固定。update() と同じ基準)
+  _halfW() {
+    return Math.max(this.sets.swim.cfg.canvas_width  * this.sets.swim.scale * 0.5,
+                    this.sets.talk.cfg.canvas_width  * this.sets.talk.scale * 0.5);
+  }
+  _halfH() {
+    return Math.max(this.sets.swim.cfg.canvas_height * this.sets.swim.scale * 0.5,
+                    this.sets.talk.cfg.canvas_height * this.sets.talk.scale * 0.5);
+  }
+
+  isAway() { return this.presence === 'away'; }
+
+  // 画面外へ抜ける。dir: +1 = 右へ / -1 = 左へ。抜け切ったら presence='away'
+  dashOut(dir, durMs = DASH_MS) {
+    if (this.presence === 'away' || (this._transit && this._transit.mode === 'out')) return;
+    const off = this._halfW() + DASH_MARGIN;
+    this._transit = {
+      mode: 'out', fromX: this.x, toX: dir > 0 ? width + off : -off,
+      startAt: millis(), durMs,
+    };
+    this.vx = dir * Math.abs(this.vx || 0.6);   // 進行方向 = 抜ける向き (体の向きが反転する)
+  }
+
+  // 画面外から入ってくる。dir: +1 = 左端から / -1 = 右端から
+  // 既にこの画面に居る (= approach が連投された) ときは何もしない。ガードが無いと
+  // 客が水槽前で少し動くたびに画面外へワープして入り直してしまう。
+  dashIn(dir, durMs = DASH_MS) {
+    if (this.presence === 'here' && (!this._transit || this._transit.mode === 'in')) return;
+    const off = this._halfW() + DASH_MARGIN;
+    this.presence = 'here';
+    this.x = dir > 0 ? -off : width + off;
+    this.y = height * 0.5;
+    this._transit = {
+      mode: 'in', fromX: this.x, toX: width * (dir > 0 ? 0.38 : 0.62),
+      startAt: millis(), durMs,
+    };
+    this.vx = dir * Math.abs(this.vx || 0.6);
+  }
+
+  // 移動中の位置を進める。true = この frame は位置を transit が支配 (通常の遊泳/壁反射をスキップ)
+  _stepTransit() {
+    if (!this._transit) return false;
+    const t = Math.min(1, (millis() - this._transit.startAt) / this._transit.durMs);
+    // 出る時は加速して消える / 入る時は減速して定位置に収まる
+    const e = this._transit.mode === 'in' ? 1 - Math.pow(1 - t, 3) : t * t;
+    this.x = this._transit.fromX + (this._transit.toX - this._transit.fromX) * e;
+    this.y += this.vy * 0.2;
+    if (t >= 1) {
+      if (this._transit.mode === 'out') this.presence = 'away';
+      this._transit = null;
+    }
+    return true;
   }
 
   // -----------------------------------------------------------
@@ -211,6 +277,7 @@ class Fish {
   // フレーム更新 (canvas は frameRate(30) 固定なのでフレーム基準でOK)
   // -----------------------------------------------------------
   update() {
+    if (this.presence === 'away') return;      // もう一方の画面に居る: 位相も進めない
     const sp = this._speed();
 
     // swim ⇄ talk: pretalk/posttalk 中間フレームを介して切り替え (setState 側で transition を仕込む)。
@@ -258,34 +325,35 @@ class Fish {
     this.finPhase  += 0.11;
     this.bobPhase  += 0.02;
 
-    // 横移動
-    this.x += this.vx * this._velocityMul();
-    // 壁判定は swim/talk の大きい方の canvas で固定する。dominantSet ごとに変えると
-    // 状態遷移 (idle→speak 等) で「swim 壁内・talk 壁外」になり頭/手がはみ出す
-    const halfW = Math.max(
-      this.sets.swim.cfg.canvas_width  * this.sets.swim.scale * 0.5,
-      this.sets.talk.cfg.canvas_width  * this.sets.talk.scale * 0.5);
-    const halfH = Math.max(
-      this.sets.swim.cfg.canvas_height * this.sets.swim.scale * 0.5,
-      this.sets.talk.cfg.canvas_height * this.sets.talk.scale * 0.5);
-    if (this.x < halfW && this.vx < 0)             this.vx = Math.abs(this.vx);
-    if (this.x > width - halfW && this.vx > 0)     this.vx = -Math.abs(this.vx);
+    // 画面またぎの移動中は transit が位置を支配する (壁反射も idle の進路抽選も止める)
+    const inTransit = this._stepTransit();
 
-    // idle のみ縦移動: GuestFish 風に FISH_TURN_MIN/MAX_SEC 秒ごとに進行角を ±FISH_TILT_MAX_DEG 内で再抽選。
-    // 休憩中 (idleRestUntil > 0) は再抽選しないが既存 vy で漂う (= ふわふわ浮く)。
-    if (this.state === 'idle' && this.idleRestUntil <= 0 && millis() >= this.nextTurnAt) {
-      const maxR = (FISH_TILT_MAX_DEG * Math.PI) / 180;
-      const ang  = random(-maxR, maxR);
-      const baseSpd = Math.max(0.35, Math.hypot(this.vx, this.vy));
-      const dir  = this.vx >= 0 ? 1 : -1;        // 水平向きは維持 (壁反射に従う)
-      this.vx = dir * baseSpd * Math.cos(ang);
-      this.vy = baseSpd * Math.sin(ang);
-      this.nextTurnAt = millis() + random(FISH_TURN_MIN_SEC, FISH_TURN_MAX_SEC) * 1000;
+    const halfW = this._halfW();
+    const halfH = this._halfH();
+    if (!inTransit) {
+      // 横移動
+      this.x += this.vx * this._velocityMul();
+      // 壁判定は swim/talk の大きい方の canvas で固定する。dominantSet ごとに変えると
+      // 状態遷移 (idle→speak 等) で「swim 壁内・talk 壁外」になり頭/手がはみ出す
+      if (this.x < halfW && this.vx < 0)             this.vx = Math.abs(this.vx);
+      if (this.x > width - halfW && this.vx > 0)     this.vx = -Math.abs(this.vx);
+
+      // idle のみ縦移動: GuestFish 風に FISH_TURN_MIN/MAX_SEC 秒ごとに進行角を ±FISH_TILT_MAX_DEG 内で再抽選。
+      // 休憩中 (idleRestUntil > 0) は再抽選しないが既存 vy で漂う (= ふわふわ浮く)。
+      if (this.state === 'idle' && this.idleRestUntil <= 0 && millis() >= this.nextTurnAt) {
+        const maxR = (FISH_TILT_MAX_DEG * Math.PI) / 180;
+        const ang  = random(-maxR, maxR);
+        const baseSpd = Math.max(0.35, Math.hypot(this.vx, this.vy));
+        const dir  = this.vx >= 0 ? 1 : -1;        // 水平向きは維持 (壁反射に従う)
+        this.vx = dir * baseSpd * Math.cos(ang);
+        this.vy = baseSpd * Math.sin(ang);
+        this.nextTurnAt = millis() + random(FISH_TURN_MIN_SEC, FISH_TURN_MAX_SEC) * 1000;
+      }
+      // vy にも _velocityMul を掛けてキック失速パターンを縦にも適用 (= 傾いた方向にキックで前進する)
+      this.y += this.vy * this._velocityMul();
+      if (this.y < halfH && this.vy < 0)             this.vy = Math.abs(this.vy);
+      if (this.y > height - halfH && this.vy > 0)    this.vy = -Math.abs(this.vy);
     }
-    // vy にも _velocityMul を掛けてキック失速パターンを縦にも適用 (= 傾いた方向にキックで前進する)
-    this.y += this.vy * this._velocityMul();
-    if (this.y < halfH && this.vy < 0)             this.vy = Math.abs(this.vy);
-    if (this.y > height - halfH && this.vy > 0)    this.vy = -Math.abs(this.vy);
 
     // 進行方向への傾き (idle で vy がある時のみ振れる、非 idle は vy=0 で自然に 0 へ収束)
     {
@@ -322,6 +390,7 @@ class Fish {
   // 描画
   // -----------------------------------------------------------
   draw() {
+    if (this.presence === 'away') return;     // もう一方の画面に居る
     // 話し中(speak)= talk セット / それ以外 = swim セット。即切り替え。
     this._drawSet(this.talkMix >= 0.5 ? 'talk' : 'swim');
   }
