@@ -439,7 +439,11 @@ window.aquarium = {
       case 'ai_speak_start':
         _aiSpeaking = true;
         _aiLingerUntil = 0;                       // 次のターン: 余韻待ちは打ち切って speak へ
-        _conversationActive = true;               // 1 度でも AI が話したら会話モード ON (= ターン間も attentive 固定)
+        // 会話モード ON = ターン間の沈黙でも泳ぎに戻さず attentive 固定。解除は leave/idle/sleep のみ。
+        // 水槽前に客が居るときの発話に限る: 入口歓迎やコーナー案内の一方向発話 (水槽ゾーンは
+        // 最初から無人なので leave が永遠に来ない) で会話モードに入ると、喋り終わっても
+        // attentive のまま固まってしまう (2026-07-10 修正)。
+        _conversationActive = (_zoneState === 'approach');
         break;
       case 'ai_speak_end':
         _aiSpeaking = false;
