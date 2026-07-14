@@ -86,6 +86,16 @@ PENDING_OWNER_LINK_PATH = _resolve_path(
     )
 )
 
+# カフェキオスク (paypay-kiosk) が起動時に商品リストを取得する読み取り専用配信元。
+# item.json は UI 編集データ (uochan-ui-data) なので STATIC_ROOT 外にあり、
+# static_handler の path traversal ガードを通れないため専用ルートで出す。
+ITEM_JSON_PATH = _resolve_path(
+    _env_or(
+        "AQUARIUM_ITEM_JSON_PATH",
+        _cfg.get("item_json_path", "/home/mine/Documents/fish_ai_realtime/item.json"),
+    )
+)
+
 V_THRESH = int(_cfg.get("background_removal", {}).get("value_threshold", 200))
 S_THRESH = int(_cfg.get("background_removal", {}).get("saturation_threshold", 30))
 LONG_EDGE = int(_cfg.get("output", {}).get("long_edge", 600))
@@ -119,6 +129,14 @@ async def guest_fish_image_handler(request: web.Request) -> web.Response:
     if not p.exists() or not p.is_file():
         return web.Response(status=404)
     return web.FileResponse(p)
+
+
+async def item_json_handler(request: web.Request) -> web.Response:
+    if not ITEM_JSON_PATH.is_file():
+        return web.Response(status=404)
+    resp = web.FileResponse(ITEM_JSON_PATH)
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 async def api_upload_handler(request: web.Request) -> web.Response:
@@ -298,6 +316,7 @@ def make_app() -> web.Application:
     app.router.add_post("/api/upload", api_upload_handler)
     app.router.add_get("/upload", upload_form_handler)
     app.router.add_get("/guest_fish/{name}", guest_fish_image_handler)
+    app.router.add_get("/item.json", item_json_handler)
     # フォールバック: それ以外はすべて STATIC_ROOT 配下から配信
     app.router.add_get("/", static_handler)
     app.router.add_get("/{tail:.*}", static_handler)
@@ -309,6 +328,7 @@ def main():
     log.info("GUEST_FISH_DIR: %s", GUEST_FISH_DIR)
     log.info("GUEST_FISH_PATH: %s", GUEST_FISH_PATH)
     log.info("PENDING_OWNER_LINK_PATH: %s", PENDING_OWNER_LINK_PATH)
+    log.info("ITEM_JSON_PATH: %s", ITEM_JSON_PATH)
     log.info("listening on http://%s:%d", HOST, PORT)
     web.run_app(make_app(), host=HOST, port=PORT, print=None)
 
