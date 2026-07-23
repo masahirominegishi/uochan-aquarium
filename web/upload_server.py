@@ -95,6 +95,20 @@ ITEM_JSON_PATH = _resolve_path(
         _cfg.get("item_json_path", "/home/mine/Documents/fish_ai_realtime/item.json"),
     )
 )
+# 事業者マスタ (キオスクの会計単位) と商品写真。item.json と同じく UI 編集データなので
+# STATIC_ROOT 外にあり、専用ルートで出す。
+VENDOR_JSON_PATH = _resolve_path(
+    _env_or(
+        "AQUARIUM_VENDOR_JSON_PATH",
+        _cfg.get("vendor_json_path", "/home/mine/Documents/fish_ai_realtime/vendors.json"),
+    )
+)
+ITEM_IMAGE_DIR = _resolve_path(
+    _env_or(
+        "AQUARIUM_ITEM_IMAGE_DIR",
+        _cfg.get("item_image_dir", "/home/mine/Documents/fish_ai_realtime/item_images"),
+    )
+)
 
 V_THRESH = int(_cfg.get("background_removal", {}).get("value_threshold", 200))
 S_THRESH = int(_cfg.get("background_removal", {}).get("saturation_threshold", 30))
@@ -137,6 +151,26 @@ async def item_json_handler(request: web.Request) -> web.Response:
     resp = web.FileResponse(ITEM_JSON_PATH)
     resp.headers["Cache-Control"] = "no-cache"
     return resp
+
+
+async def vendor_json_handler(request: web.Request) -> web.Response:
+    """事業者マスタ。未作成なら 404 → キオスクは前回の vendors-data.js のまま起動する。"""
+    if not VENDOR_JSON_PATH.is_file():
+        return web.Response(status=404)
+    resp = web.FileResponse(VENDOR_JSON_PATH)
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+async def item_image_handler(request: web.Request) -> web.Response:
+    """商品写真。item.json の image (ファイル名のみ) をキオスクがこの URL で引く。"""
+    name = request.match_info["name"]
+    if not _SAFE_NAME_RE.match(name):
+        return web.Response(status=400, text="invalid name")
+    p = ITEM_IMAGE_DIR / name
+    if not p.exists() or not p.is_file():
+        return web.Response(status=404)
+    return web.FileResponse(p)
 
 
 async def api_upload_handler(request: web.Request) -> web.Response:
@@ -317,6 +351,8 @@ def make_app() -> web.Application:
     app.router.add_get("/upload", upload_form_handler)
     app.router.add_get("/guest_fish/{name}", guest_fish_image_handler)
     app.router.add_get("/item.json", item_json_handler)
+    app.router.add_get("/vendors.json", vendor_json_handler)
+    app.router.add_get("/item_images/{name}", item_image_handler)
     # フォールバック: それ以外はすべて STATIC_ROOT 配下から配信
     app.router.add_get("/", static_handler)
     app.router.add_get("/{tail:.*}", static_handler)
