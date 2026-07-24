@@ -30,10 +30,27 @@ const IS_MAIN = TANK !== 'sub';
 // 物理配置: 65吋が左、サブが右。よって「右へ抜ける = 大水槽から出ていく」。
 // 大水槽 → サブ: main が右(+1)へ抜け、少し遅れて sub が左(+1)から入る。
 // サブ → 大水槽: sub が左(-1)へ抜け、少し遅れて main が右(-1)から入る。
-const HANDOFF_DELAY_MS = 150;    // 出ていく画面と入ってくる画面のずれ (渡っている感)
+// 抜けるアニメは DASH_MS=200ms (fish.js)。遅延がそれ未満だと両画面に同時に映る
+// 瞬間ができる (2026-07-24 現地指摘) ので、下限は 200ms + ws 到着ジッタ。
+// 行きと帰りで体感が違う (2026-07-24 現地チューニング: 同じ 300ms だと
+// 行き=サブに現れるのが早すぎ / 帰り=大画面に現れるのが少し遅い) ので別々に持つ。
+// 下限の注意: 描画は 30fps (frameRate(30)) なので、抜け切り (presence='away') は
+// 抜けアニメの長さちょうどではなく次のフレームまで最大 +33ms ずれる。
+// 入る側の遅延の下限 = 抜けアニメ長 + 33ms + ジッタ余裕 ~27ms
+// (220ms で二重表示が 1 回再現した 2026-07-24 機械検証より)。
+// 帰りは「大画面に現れるのが遅い」体感だったため、抜けアニメ自体を短くして
+// (200→140ms) 現れを 200ms まで前倒しした。
+// アニメの速さ (DASH_MS=200ms) は変えない。調整はタイミング (遅延) のみ (2026-07-24 方針)。
+// 帰りは体感優先で重なりを許容し (ユーザー判断)、大水槽へは遅延なしで即入り始める。
+const HANDOFF_GO_DELAY_MS     = 600;  // 大水槽→サブ: サブに現れるまでの間 (行きは重なりなし)
+const HANDOFF_RETURN_DELAY_MS = 0;    // サブ→大水槽: 遅延なしで即入る
+
+// サブ水槽は物理的に小さいモニターなので、同じピクセルサイズだと うおちゃんが
+// 小さく見える。サブでは 2.16 倍で表示する (2026-07-24 現地調整: 1.2 → 1.8 → ×1.2)。
+const SUB_SIZE_MUL = 2.16;
 // 客が離れてもすぐには帰らない。しばらくサブでのんびり泳がせてから大水槽へ戻る。
 // 途中で再び ToF on になれば帰還はキャンセル (行ったり来たりの防止も兼ねる)。
-const RETURN_DELAY_MS  = 60000;
+const RETURN_DELAY_MS  = 59900;  // 60 秒から 0.1 秒短縮 (2026-07-24 指示)
 let _returnTimer  = null;
 let _handoffTimer = null;
 
@@ -130,7 +147,9 @@ function setup() {
   ellipseMode(CENTER);
 
   // パーツリギングでうおちゃん本体を作成 (swim / talk 2セット)
-  mainFish = new Fish(rig, { swim: swimImgs, talk: talkImgs });
+  // サブ水槽では SUB_SIZE_MUL 倍で表示 (小さいモニターとの見た目合わせ)
+  mainFish = new Fish(rig, { swim: swimImgs, talk: talkImgs },
+                      { sizeMul: IS_MAIN ? 1 : SUB_SIZE_MUL });
   // うおちゃんの定位置は大水槽。サブは客が来るまで空っぽ。
   if (!IS_MAIN) mainFish.presence = 'away';
 
@@ -387,7 +406,7 @@ function _uochanComeToSub() {
     _handoffTimer = setTimeout(() => {
       _handoffTimer = null;
       mainFish.dashIn(+1);                                             // 左から入ってくる
-    }, HANDOFF_DELAY_MS);
+    }, HANDOFF_GO_DELAY_MS);
   }
 }
 
@@ -401,7 +420,7 @@ function _scheduleReturn() {
       _handoffTimer = setTimeout(() => {
         _handoffTimer = null;
         mainFish.dashIn(-1);                                           // 右から入ってくる
-      }, HANDOFF_DELAY_MS);
+      }, HANDOFF_RETURN_DELAY_MS);
     } else {
       mainFish.dashOut(-1);                                            // 左へ抜ける
     }

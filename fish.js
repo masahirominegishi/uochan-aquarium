@@ -63,16 +63,19 @@ const DASH_MARGIN = 40;          // 画面外へ何 px 余分に抜けるか (�
 class Fish {
   // rig:    rig.json の中身 ({ swim:{...}, talk:{...} })
   // images: { swim: { name -> p5.Image }, talk: { name -> p5.Image } }
-  constructor(rig, images) {
+  // opts:   { sizeMul } 表示倍率。サブ水槽 (物理的に小さいモニター) で大きめに
+  //         出すために使う。scale に掛かるので壁反射・画面外判定も追随する。
+  constructor(rig, images, opts = {}) {
     this.rig = rig;
+    const sizeMul = opts.sizeMul || 1;
 
     // セットごとに描画用の前計算 (display スケール / キャンバス中心 / レイヤー一覧 / pose_cycle の区切り境界)
     this.sets = {};
     for (const key of ['swim', 'talk']) {
       const cfg = rig[key];
-      const scale = cfg.display_width
+      const scale = (cfg.display_width
         ? cfg.display_width / cfg.canvas_width
-        : cfg.display_height / cfg.canvas_height;
+        : cfg.display_height / cfg.canvas_height) * sizeMul;
       const anchor = cfg.anchor || [cfg.canvas_width / 2, cfg.canvas_height / 2];
       // pose_cycle の各区切りの相対長 (cycle_weights、未指定なら全部 1) → 累積境界 [0, …, 1]
       const keys = cfg.pose_cycle || ['rest'];
