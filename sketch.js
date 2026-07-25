@@ -48,9 +48,12 @@ const HANDOFF_RETURN_DELAY_MS = 0;    // サブ→大水槽: 遅延なしで即�
 // サブ水槽は物理的に小さいモニターなので、同じピクセルサイズだと うおちゃんが
 // 小さく見える。サブでは 2.16 倍で表示する (2026-07-24 現地調整: 1.2 → 1.8 → ×1.2)。
 const SUB_SIZE_MUL = 2.16;
-// 客が離れてもすぐには帰らない。しばらくサブでのんびり泳がせてから大水槽へ戻る。
-// 途中で再び ToF on になれば帰還はキャンセル (行ったり来たりの防止も兼ねる)。
-const RETURN_DELAY_MS  = 59900;  // 60 秒から 0.1 秒短縮 (2026-07-24 指示)
+// 客が離れてもすぐには帰らない、の 59.9 秒はサーバー側の会話ラッチ
+// (zone_state.py CONVERSATION_RELEASE_SEC) に移した (2026-07-25)。
+// leave はラッチ解除後にしか届かないので、届いたら即帰る。
+// これで 2 画面それぞれの setTimeout が独立発火して帰りがズレる問題も消える
+// (帰りタイミングの正はサーバー 1 箇所)。
+const RETURN_DELAY_MS  = 0;
 let _returnTimer  = null;
 let _handoffTimer = null;
 
@@ -410,7 +413,7 @@ function _uochanComeToSub() {
   }
 }
 
-// ToF off。RETURN_DELAY_MS 後に大水槽へ帰す。それまではサブでのんびり泳いでいる。
+// leave/idle 受信 (= サーバーの会話ラッチが 59.9 秒の不在で解除済み)。大水槽へ帰す。
 function _scheduleReturn() {
   if (_returnTimer) return;        // 既に帰り支度中: leave/idle の連投でタイマーを伸ばさない
   _cancelHandoff();
