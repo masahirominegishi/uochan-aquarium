@@ -1,13 +1,15 @@
 #!/bin/sh
-# うおちゃん kiosk 起動 + 白画面ウォッチドッグ (2026-07-26)
+# うおちゃん kiosk 起動 + 白画面ウォッチドッグ (2026-07-26 / 同日v2で常駐化)
 #
 # 経緯: 電源ON直後、chromium がネットワークサービスをクラッシュさせて
 # 両画面とも真っ白のまま固まる事故が発生 (12:56 boot で実発生)。
 # 従来 autostart はただ起動するだけで、描画できたかを確認していなかった。
+# v2: 起動直後チェック通過の20秒後にクラッシュして白画面を取りこぼした実例
+# (16:02 boot) を受け、チェックを1回きりから常駐 (60秒おき) に変更。
 #
 # このスクリプトは 起動 → 描画確認 (grim スクリーンショットの白率) → NG なら
-# kill して再起動、を最大 MAX_TRIES 回繰り返す。手動でも実行できる
-# (実行すると既存 kiosk を落として起動し直す):
+# kill して再起動、その後も60秒おきに白画面を監視し続ける。手動でも実行できる
+# (実行すると既存 kiosk と旧ウォッチドッグを落として起動し直す):
 #   ~/Documents/aquarium/kiosk_launch.sh
 #
 # 白率判定: 水槽ページは常に青系なので、ほぼ全ピクセル白 = 描画死と断定できる。
@@ -22,9 +24,20 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 CHROMIUM=/usr/lib/chromium/chromium
 URL_BASE="http://localhost:8080"
 LOG=/tmp/kiosk_watchdog.log
+PIDFILE=/tmp/kiosk_launch.pid
 MAX_TRIES=3
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+
+# 常駐化に伴う一人っ子制御: 旧インスタンス (常駐ウォッチドッグ) が居たら退場させる
+if [ -f "$PIDFILE" ]; then
+  old=$(cat "$PIDFILE" 2>/dev/null)
+  if [ -n "$old" ] && [ "$old" != "$$" ] && kill -0 "$old" 2>/dev/null; then
+    kill "$old" 2>/dev/null
+    sleep 1
+  fi
+fi
+echo "$$" > "$PIDFILE"
 
 kill_kiosk() {
   # 自プロセスの cmdline はスクリプトパスだけなので自爆しない
@@ -69,6 +82,31 @@ print("white" if white > 0.98 else "ok")
 EOF
 }
 
+# 起動 → 描画確認 を最大 MAX_TRIES 回。成功で 0
+start_and_verify() {
+  n=1
+  while [ "$n" -le "$MAX_TRIES" ]; do
+    kill_kiosk
+    launch_kiosk
+    log "起動 (試行 $n/$MAX_TRIES)"
+    sleep 20  # ページ読み込み待ち
+    bad=0
+    for out in HDMI-A-1 HDMI-A-2; do
+      r=$(check_output "$out")
+      log "  $out: $r"
+      [ "$r" = "white" ] && bad=1
+    done
+    if [ "$bad" -eq 0 ]; then
+      log "描画OK"
+      return 0
+    fi
+    log "白画面検知 → 再起動する"
+    n=$((n + 1))
+  done
+  log "白画面のまま ($MAX_TRIES 回失敗)。60秒後の定期チェックで再挑戦する"
+  return 1
+}
+
 # Web サーバー待ち (最大60秒)
 i=0
 while [ "$i" -lt 60 ]; do
@@ -77,24 +115,18 @@ while [ "$i" -lt 60 ]; do
   i=$((i + 1))
 done
 
-n=1
-while [ "$n" -le "$MAX_TRIES" ]; do
-  kill_kiosk
-  launch_kiosk
-  log "起動 (試行 $n/$MAX_TRIES)"
-  sleep 20  # ページ読み込み待ち
+start_and_verify
+
+# 常駐ウォッチドッグ: 起動直後のチェック通過後にクラッシュするケースを拾う。
+# 正常時はログを書かない (60秒おきのスパム防止)。
+while :; do
+  sleep 60
   bad=0
   for out in HDMI-A-1 HDMI-A-2; do
-    r=$(check_output "$out")
-    log "  $out: $r"
-    [ "$r" = "white" ] && bad=1
+    [ "$(check_output "$out")" = "white" ] && bad=1
   done
-  if [ "$bad" -eq 0 ]; then
-    log "描画OK"
-    exit 0
+  if [ "$bad" -eq 1 ]; then
+    log "定期チェックで白画面検知 → 再起動する"
+    start_and_verify
   fi
-  log "白画面検知 → 再起動する"
-  n=$((n + 1))
 done
-log "白画面のまま諦め ($MAX_TRIES 回失敗)。手動確認が必要"
-exit 1
