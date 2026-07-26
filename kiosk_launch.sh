@@ -58,6 +58,12 @@ kill_kiosk() {
   # 自プロセスの cmdline はスクリプトパスだけなので自爆しない
   pkill -f "chromium.*tank=" 2>/dev/null
   sleep 3
+  # SingletonLock 残骸の削除 (2026-07-26 v3.2)。シャットダウンで強制終了された
+  # chromium のロックが残ると、次ブートで「raspberrypi-<旧PID>」の PID を偶然
+  # 別プロセスが使っていて「別インスタンス生存」と誤認 → --noerrdialogs のため
+  # ダイアログも出さず黙って終了する (stderr 0バイトの正体、ブート初回に毎回発生)。
+  # ここは必ず pkill 直後なので、消して困る生きたロックは存在しない。
+  rm -f "$HOME/.config/chromium/Singleton"* "$HOME/.config/chromium-tank65/Singleton"*
 }
 
 launch_kiosk() {
