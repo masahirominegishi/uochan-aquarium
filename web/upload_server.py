@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
 
@@ -171,6 +172,55 @@ async def item_image_handler(request: web.Request) -> web.Response:
     if not p.exists() or not p.is_file():
         return web.Response(status=404)
     return web.FileResponse(p)
+
+
+# ─── 店員呼び出し (カフェキオスク「店員を呼ぶ」ボタン, 2026-07-26) ─────────
+# キオスクが POST してくると、うおちゃんの声の作り置き音声 (sound/staff_call.wav,
+# OpenAI TTS coral で生成した「店員さーん、対応お願いします」) を店内スピーカー
+# (既定シンク = uorear = 水槽/カフェ側) から paplay で再生する。
+# うおちゃんがサブ水槽で接客中 (zone_state.active_zone == zone_003, 会話ラッチ込み)
+# のときは自分の接客と声が重なるので鳴らさない → キオスク側のチャイムのみ。
+ZONE_STATE_PATH = _resolve_path(
+    _env_or(
+        "AQUARIUM_ZONE_STATE",
+        _cfg.get("zone_state_path", "/home/mine/Documents/fish_ai_realtime/zone_state.json"),
+    )
+)
+STAFF_CALL_WAV = _resolve_path(
+    _env_or("AQUARIUM_STAFF_CALL_WAV", _cfg.get("staff_call_wav", "../sound/staff_call.wav"))
+)
+STAFF_CALL_ZONE = _env_or("AQUARIUM_ZONE_ID", _cfg.get("staff_call_zone", "zone_003"))
+_staff_call_state = {"last": 0.0}   # 連打デバウンス (monotonic)
+
+
+def _fish_at_sub_tank() -> bool:
+    """うおちゃんがサブ水槽 (会話側) に居るか。判定不能時は False (=鳴らす) に倒す。"""
+    try:
+        with ZONE_STATE_PATH.open() as f:
+            state = json.load(f)
+        return state.get("active_zone") == STAFF_CALL_ZONE
+    except Exception:
+        return False
+
+
+async def staff_call_handler(request: web.Request) -> web.Response:
+    now = time.monotonic()
+    if now - _staff_call_state["last"] < 4.0:
+        return web.json_response({"ok": True, "voice": False, "reason": "debounce"})
+    _staff_call_state["last"] = now
+    if _fish_at_sub_tank():
+        log.info("[staff_call] うおちゃん接客中 → 声はスキップ (キオスクのチャイムのみ)")
+        return web.json_response({"ok": True, "voice": False, "reason": "uochan_busy"})
+    if not STAFF_CALL_WAV.is_file():
+        log.warning("[staff_call] 音声ファイルが無い: %s", STAFF_CALL_WAV)
+        return web.json_response({"ok": False, "voice": False, "reason": "no_wav"}, status=500)
+    # systemd 配下は XDG_RUNTIME_DIR が無く paplay が PipeWire に繋がらないので補う
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    subprocess.Popen(["paplay", str(STAFF_CALL_WAV)], env=env,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log.info("[staff_call] 呼び出し音声を再生")
+    return web.json_response({"ok": True, "voice": True})
 
 
 async def api_upload_handler(request: web.Request) -> web.Response:
@@ -348,6 +398,7 @@ submitEl.addEventListener('click', async () => {
 def make_app() -> web.Application:
     app = web.Application(client_max_size=MAX_BYTES + 1024 * 1024)
     app.router.add_post("/api/upload", api_upload_handler)
+    app.router.add_post("/staff_call", staff_call_handler)
     app.router.add_get("/upload", upload_form_handler)
     app.router.add_get("/guest_fish/{name}", guest_fish_image_handler)
     app.router.add_get("/item.json", item_json_handler)
