@@ -15,6 +15,12 @@
 # 白率判定: 水槽ページは常に青系なので、ほぼ全ピクセル白 = 描画死と断定できる。
 # grim が撮れない出力 (TV電源off等) は判定スキップ (起動はしてあるので無害)。
 #
+# 証拠保全 (2026-07-26 v3.1): ログは /tmp でなく ~/kiosk_logs に永続保存する。
+# 以前は chromium stderr を /tmp に truncate 上書きしていたため、ウォッチドッグが
+# 再起動で回復するたびに直前の事故の証拠 (クラッシュメッセージ) が消えていた。
+# 白画面の真因特定には「壊れたインスタンスの stderr」が必須なので、
+# ランチごとにタイムスタンプ付きファイルへ分け、直近20世代を残す。
+#
 # デプロイ: Mac ~/Program/aquarium が権威。rsync で pi-main ~/Documents/aquarium へ。
 # 呼び出し元: ~/.config/labwc/autostart (wlr-randr / CEC はそちらに残している)
 
@@ -23,11 +29,20 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 CHROMIUM=/usr/lib/chromium/chromium
 URL_BASE="http://localhost:8080"
-LOG=/tmp/kiosk_watchdog.log
+LOGDIR="$HOME/kiosk_logs"
+LOG="$LOGDIR/watchdog.log"
 PIDFILE=/tmp/kiosk_launch.pid
 MAX_TRIES=3
 
+mkdir -p "$LOGDIR"
+
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+
+# watchdog.log はブートをまたいで追記し続けるので、1MB 超で1世代ローテ
+if [ "$(wc -c < "$LOG" 2>/dev/null || echo 0)" -gt 1048576 ]; then
+  mv "$LOG" "$LOG.old"
+fi
+log "==== スクリプト開始 (boot=$(uptime -s)) ===="
 
 # 常駐化に伴う一人っ子制御: 旧インスタンス (常駐ウォッチドッグ) が居たら退場させる
 if [ -f "$PIDFILE" ]; then
@@ -46,13 +61,19 @@ kill_kiosk() {
 }
 
 launch_kiosk() {
+  # stderr はランチごとに新ファイルへ (証拠保全)。直近20世代 (LG/TV 各) を残す
+  ts=$(date '+%Y%m%d_%H%M%S')
+  for pfx in lg tv; do
+    ls -1t "$LOGDIR"/${pfx}_*.log 2>/dev/null | tail -n +20 | xargs -r rm --
+  done
+  log "chromium ログ: ${ts} (lg_/tv_)"
   # LG = 空の水槽 (うおちゃんが話しに来る側)。音は鳴らさない。
   "$CHROMIUM" --ozone-platform=wayland \
     --kiosk --noerrdialogs --disable-infobars --no-first-run \
     --disable-session-crashed-bubble --check-for-update-interval=31536000 \
     --password-store=basic \
     --mute-audio \
-    "$URL_BASE/?tank=sub" >/tmp/kiosk_lg.log 2>&1 &
+    "$URL_BASE/?tank=sub" >"$LOGDIR/lg_$ts.log" 2>&1 &
   sleep 3
   # 65吋 = 大水槽。ゲスト魚と着水音はこちら。app_id=tank65 を rc.xml windowRule が拾う。
   "$CHROMIUM" --ozone-platform=wayland \
@@ -61,7 +82,7 @@ launch_kiosk() {
     --password-store=basic \
     --class=tank65 --user-data-dir="$HOME/.config/chromium-tank65" \
     --autoplay-policy=no-user-gesture-required \
-    "$URL_BASE/?tank=main" >/tmp/kiosk_tv.log 2>&1 &
+    "$URL_BASE/?tank=main" >"$LOGDIR/tv_$ts.log" 2>&1 &
 }
 
 # 出力1面が真っ白なら "white"、正常なら "ok"、撮れなければ "skip" を返す
