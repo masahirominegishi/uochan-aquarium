@@ -73,8 +73,12 @@ launch_kiosk() {
     ls -1t "$LOGDIR"/${pfx}_*.log 2>/dev/null | tail -n +20 | xargs -r rm --
   done
   log "chromium ログ: ${ts} (lg_/tv_)"
+  # --enable-logging=stderr --v=1: ブート初回の沈黙死 (stderr 0バイトのまま
+  # 起動極初期で停止) の現場特定用トレース (2026-07-26 v3.3)。沈黙死の瞬間に
+  # 「最後にどこまで進んだか」が残る。解決したら外してよい。
   # LG = 空の水槽 (うおちゃんが話しに来る側)。音は鳴らさない。
   "$CHROMIUM" --ozone-platform=wayland \
+    --enable-logging=stderr --v=1 \
     --kiosk --noerrdialogs --disable-infobars --no-first-run \
     --disable-session-crashed-bubble --check-for-update-interval=31536000 \
     --password-store=basic \
@@ -83,6 +87,7 @@ launch_kiosk() {
   sleep 3
   # 65吋 = 大水槽。ゲスト魚と着水音はこちら。app_id=tank65 を rc.xml windowRule が拾う。
   "$CHROMIUM" --ozone-platform=wayland \
+    --enable-logging=stderr --v=1 \
     --kiosk --noerrdialogs --disable-infobars --no-first-run \
     --disable-session-crashed-bubble --check-for-update-interval=31536000 \
     --password-store=basic \
@@ -140,7 +145,10 @@ start_and_verify() {
       [ "$r" = "white" ] && bad=1
     done
     w=$(check_ws)
-    log "  ws: $w"
+    # procs = 生きている chromium 本体プロセス数 (正常=2)。沈黙死の
+    # 「死んでいるのかハングしているのか」の切り分け用
+    np=$(pgrep -fc "chromium.*tank=" 2>/dev/null || echo 0)
+    log "  ws: $w (chromium procs: $np)"
     [ "$w" = "bad" ] && bad=1
     if [ "$bad" -eq 0 ]; then
       log "描画+WS OK"
@@ -183,7 +191,8 @@ while :; do
   fi
   if [ "$(check_ws)" = "bad" ]; then
     ws_bad_streak=$((ws_bad_streak + 1))
-    log "定期チェックで WS 未接続 ($ws_bad_streak/2)"
+    np=$(pgrep -fc "chromium.*tank=" 2>/dev/null || echo 0)
+    log "定期チェックで WS 未接続 ($ws_bad_streak/2, chromium procs: $np)"
     if [ "$ws_bad_streak" -ge 2 ]; then
       log "WS 未接続が継続 → 再起動する"
       ws_bad_streak=0
