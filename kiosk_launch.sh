@@ -82,7 +82,23 @@ print("white" if white > 0.98 else "ok")
 EOF
 }
 
-# 起動 → 描画確認 を最大 MAX_TRIES 回。成功で 0
+# ブリッジ (ポート 8765) への WS 接続数チェック。
+# 「絵は描けているがイベント配線が死んでいる」状態の検出用。chromium の
+# ネットワークサービスだけがクラッシュすると、canvas は青い水槽を描き続ける
+# (= 白率チェックは素通り) のに WS が繋がらず、うおちゃんが一切動かない事故が
+# 起きる (2026-07-26 16:47 boot で実発生)。
+# 返り値: "ok" = 2 本以上 / "bad" = 2 本未満 / "skip" = ブリッジ自体が
+# 落ちている (chromium のせいではないので kiosk 再起動しても直らない)
+check_ws() {
+  if [ -z "$(ss -Htln 'sport = :8765' 2>/dev/null)" ]; then
+    echo skip
+    return
+  fi
+  n_ws=$(ss -Htn state established 'sport = :8765' 2>/dev/null | wc -l)
+  [ "$n_ws" -ge 2 ] && echo ok || echo bad
+}
+
+# 起動 → 描画+WS確認 を最大 MAX_TRIES 回。成功で 0
 start_and_verify() {
   n=1
   while [ "$n" -le "$MAX_TRIES" ]; do
@@ -96,14 +112,17 @@ start_and_verify() {
       log "  $out: $r"
       [ "$r" = "white" ] && bad=1
     done
+    w=$(check_ws)
+    log "  ws: $w"
+    [ "$w" = "bad" ] && bad=1
     if [ "$bad" -eq 0 ]; then
-      log "描画OK"
+      log "描画+WS OK"
       return 0
     fi
-    log "白画面検知 → 再起動する"
+    log "異常検知 → 再起動する"
     n=$((n + 1))
   done
-  log "白画面のまま ($MAX_TRIES 回失敗)。60秒後の定期チェックで再挑戦する"
+  log "異常のまま ($MAX_TRIES 回失敗)。60秒後の定期チェックで再挑戦する"
   return 1
 }
 
@@ -119,6 +138,10 @@ start_and_verify
 
 # 常駐ウォッチドッグ: 起動直後のチェック通過後にクラッシュするケースを拾う。
 # 正常時はログを書かない (60秒おきのスパム防止)。
+# WS 未接続は 2 回連続 (約2分) で再起動: ws-client は 5 秒間隔で再接続を
+# 試みるので、一瞬の切断は 1 回目のチェックまでに自然回復する。連続で
+# 落ちたままなら chromium 側が壊れていると判断する。
+ws_bad_streak=0
 while :; do
   sleep 60
   bad=0
@@ -127,6 +150,19 @@ while :; do
   done
   if [ "$bad" -eq 1 ]; then
     log "定期チェックで白画面検知 → 再起動する"
+    ws_bad_streak=0
     start_and_verify
+    continue
+  fi
+  if [ "$(check_ws)" = "bad" ]; then
+    ws_bad_streak=$((ws_bad_streak + 1))
+    log "定期チェックで WS 未接続 ($ws_bad_streak/2)"
+    if [ "$ws_bad_streak" -ge 2 ]; then
+      log "WS 未接続が継続 → 再起動する"
+      ws_bad_streak=0
+      start_and_verify
+    fi
+  else
+    ws_bad_streak=0
   fi
 done

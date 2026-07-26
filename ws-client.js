@@ -8,24 +8,24 @@
 //
 // 接続先の決め方
 //   1. URL クエリ ?ws=ws://host:port/ があればそれを優先
-//   2. file:// / localhost で開いている (Mac 開発時) → raspberrypi.local:8765
+//   2. file:// で開いている (Mac 開発時) → raspberrypi.local:8765
 //      （pi-main は SSH エイリアスで mDNS 名ではないため使わない）
 //   3. それ以外 → 同じホスト名の :8765
+//      pi-main の kiosk は http://localhost:8080 で開くのでここに入り
+//      ws://localhost:8765 になる。以前は localhost を Mac 開発扱いして
+//      raspberrypi.local (mDNS) に繋いでいたが、ブート直後は avahi が
+//      間に合わず接続失敗の温床だった (2026-07-26 修正)。
 // =============================================================
 
 (function () {
   const params = new URLSearchParams(location.search);
   const explicit = params.get('ws');
   const host = location.hostname;
-  const isLocal =
-    location.protocol === 'file:' ||
-    host === '' ||
-    host === 'localhost' ||
-    host === '127.0.0.1';
+  const isFile = location.protocol === 'file:' || host === '';
 
   const wsUrl =
     explicit ||
-    (isLocal ? 'ws://raspberrypi.local:8765/' : `ws://${host}:8765/`);
+    (isFile ? 'ws://raspberrypi.local:8765/' : `ws://${host}:8765/`);
 
   let ws = null;
   let reconnectTimer = null;
