@@ -6,6 +6,8 @@
 # 従来 autostart はただ起動するだけで、描画できたかを確認していなかった。
 # v2: 起動直後チェック通過の20秒後にクラッシュして白画面を取りこぼした実例
 # (16:02 boot) を受け、チェックを1回きりから常駐 (60秒おき) に変更。
+# v4 (2026-07-27): LG の canvas 縮小症状 (小さくトリミング+周囲黒) を受け、
+# 白率に加えて黒率チェックを追加 (check_output / output_is_bad 参照)。
 #
 # このスクリプトは 起動 → 描画確認 (grim スクリーンショットの白率) → NG なら
 # kill して再起動、その後も60秒おきに白画面を監視し続ける。手動でも実行できる
@@ -96,7 +98,16 @@ launch_kiosk() {
     "$URL_BASE/?tank=main" >"$LOGDIR/tv_$ts.log" 2>&1 &
 }
 
-# 出力1面が真っ白なら "white"、正常なら "ok"、撮れなければ "skip" を返す
+# 出力1面の描画判定。返り値:
+#   "white"    = ほぼ全面白 (描画死)
+#   "black"    = 黒が3割以上 (canvas 縮小症状。2026-07-27 boot で実発生:
+#                窓は全画面・WS ok なのに p5 canvas だけ起動初期サイズ 945x640 の
+#                まま左上に残り、周囲が黒。白率も WS も素通りする穴だった。
+#                水槽は常に青系 (実測: 正常時の黒率 0.000〜0.002 / 症状時 0.694)
+#                なので黒3割 = 異常と断定できる)
+#   "allblack" = ほぼ全面黒。65吋は HDCP で grim が正常でも全面黒になることが
+#                あるため、呼び出し側は HDMI-A-2 の allblack を異常扱いしない
+#   "ok" / "skip" (撮れない)
 check_output() {
   out="$1"
   shot="/tmp/kiosk_check_$out.png"
@@ -109,9 +120,28 @@ import sys
 from PIL import Image
 im = Image.open(sys.argv[1]).convert("L").resize((64, 36))
 px = list(im.getdata())
-white = sum(1 for v in px if v > 245) / len(px)
-print("white" if white > 0.98 else "ok")
+n = len(px)
+white = sum(1 for v in px if v > 245) / n
+black = sum(1 for v in px if v < 16) / n
+if white > 0.98:
+    print("white")
+elif black >= 0.985:
+    print("allblack")
+elif black >= 0.30:
+    print("black")
+else:
+    print("ok")
 EOF
+}
+
+# check_output の結果が異常 (再起動に値する) なら 0 を返す。
+# allblack は LG (HDMI-A-1) のみ異常扱い (65吋は HDCP の偽陰性がありうるため)
+output_is_bad() {
+  case "$2" in
+    white|black) return 0 ;;
+    allblack) [ "$1" = "HDMI-A-1" ] && return 0 ;;
+  esac
+  return 1
 }
 
 # ブリッジ (ポート 8765) への WS 接続数チェック。
@@ -142,7 +172,7 @@ start_and_verify() {
     for out in HDMI-A-1 HDMI-A-2; do
       r=$(check_output "$out")
       log "  $out: $r"
-      [ "$r" = "white" ] && bad=1
+      output_is_bad "$out" "$r" && bad=1
     done
     w=$(check_ws)
     # procs = 生きている chromium 本体プロセス数 (正常=2)。沈黙死の
@@ -180,11 +210,16 @@ ws_bad_streak=0
 while :; do
   sleep 60
   bad=0
+  reason=""
   for out in HDMI-A-1 HDMI-A-2; do
-    [ "$(check_output "$out")" = "white" ] && bad=1
+    r=$(check_output "$out")
+    if output_is_bad "$out" "$r"; then
+      bad=1
+      reason="$out: $r"
+    fi
   done
   if [ "$bad" -eq 1 ]; then
-    log "定期チェックで白画面検知 → 再起動する"
+    log "定期チェックで描画異常検知 ($reason) → 再起動する"
     ws_bad_streak=0
     start_and_verify
     continue
