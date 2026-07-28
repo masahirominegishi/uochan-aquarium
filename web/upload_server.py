@@ -271,6 +271,15 @@ async def api_upload_handler(request: web.Request) -> web.Response:
         log.exception("画像保存失敗")
         return web.json_response({"error": f"保存失敗: {e}"}, status=500)
 
+    # 切り抜き失敗時の救済用に、切り抜き前の元画像も guest_fish/raw/ に残す (失敗しても登録は続行)
+    try:
+        ext = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}.get((img.format or "").upper(), "jpg")
+        raw_dir = GUEST_FISH_DIR / "raw"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        (raw_dir / f"{fish_id}.{ext}").write_bytes(raw)
+    except Exception as e:
+        log.warning("元画像 (raw) 保存失敗・登録は続行: %s", e)
+
     async with _metadata_lock:
         append_fish(GUEST_FISH_PATH, fish_id, out_name)
 

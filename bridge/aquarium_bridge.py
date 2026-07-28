@@ -116,6 +116,7 @@ ai_tracker = {
 guest_fish_tracker = {
     "known_ids": set(),
     "owner_by_id": {},   # fish_id -> owner_person_id (or None)
+    "image_by_id": {},   # fish_id -> image ファイル名 (差し替え検知用)
 }
 
 # 顔認識 owner present 追跡 (Phase 1.5 再来訪演出)
@@ -199,11 +200,13 @@ def _fish_to_payload(fish):
 
 
 def compute_guest_fish_events(gf):
-    """guest_fish.json から (added, updated, removed) を返す。
+    """guest_fish.json から (added, updated, removed, replaced) を返す。
 
-    - added:   新規 fish_id (fish_added 配信用 payload)
-    - updated: 既存 fish_id の owner_person_id 変更 (fish_owner_updated 配信用)
-    - removed: 既存 fish_id が消失 (fish_removed 配信用 {id})
+    - added:    新規 fish_id (fish_added 配信用 payload)
+    - updated:  既存 fish_id の owner_person_id 変更 (fish_owner_updated 配信用)
+    - removed:  既存 fish_id が消失 (fish_removed 配信用 {id})
+    - replaced: 既存 fish_id の image 変更 (管理UIの画像差し替え/元に戻す)。
+                fish_removed → fish_added の順で再配信し、走行中の水槽の絵を入れ替える
 
     Phase 1.5 で owner_by_id 追跡を追加: 既存 fish の owner_person_id が None → 設定値に
     変わったタイミングで fish_owner_updated を発火。realtime_loop の _link_fish_to_person
@@ -213,27 +216,35 @@ def compute_guest_fish_events(gf):
     current_ids = set()
     added = []
     updated = []
+    replaced = []
     for f in fishes:
         fid = f.get("id")
         if not fid:
             continue
         current_ids.add(fid)
         owner = f.get("owner_person_id")
+        image = f.get("image")
         if fid not in guest_fish_tracker["known_ids"]:
             guest_fish_tracker["known_ids"].add(fid)
             guest_fish_tracker["owner_by_id"][fid] = owner
+            guest_fish_tracker["image_by_id"][fid] = image
             added.append(_fish_to_payload(f))
         else:
             prev_owner = guest_fish_tracker["owner_by_id"].get(fid)
             if prev_owner != owner:
                 guest_fish_tracker["owner_by_id"][fid] = owner
                 updated.append({"id": fid, "owner_person_id": owner})
+            prev_image = guest_fish_tracker["image_by_id"].get(fid)
+            if prev_image != image:
+                guest_fish_tracker["image_by_id"][fid] = image
+                replaced.append(_fish_to_payload(f))
     removed_ids = guest_fish_tracker["known_ids"] - current_ids
     removed = [{"id": fid} for fid in removed_ids]
     for fid in removed_ids:
         guest_fish_tracker["known_ids"].discard(fid)
         guest_fish_tracker["owner_by_id"].pop(fid, None)
-    return added, updated, removed
+        guest_fish_tracker["image_by_id"].pop(fid, None)
+    return added, updated, removed, replaced
 
 
 def compute_owner_present_event(zs, gf):
@@ -278,7 +289,7 @@ async def evaluate_and_emit():
 
     if GUEST_FISH_FILE is not None:
         gf = _load_json(GUEST_FISH_FILE)
-        added, updated, removed = compute_guest_fish_events(gf)
+        added, updated, removed, replaced = compute_guest_fish_events(gf)
         for payload in added:
             log.info("guest fish added -> %s", payload)
             await broadcast("fish_added", payload)
@@ -288,6 +299,11 @@ async def evaluate_and_emit():
         for payload in removed:
             log.info("guest fish removed -> %s", payload)
             await broadcast("fish_removed", payload)
+        for payload in replaced:
+            # 画像差し替え: 既存ハンドラだけで完結するよう remove → add で入れ替える
+            log.info("guest fish image replaced -> %s", payload)
+            await broadcast("fish_removed", {"id": payload["id"]})
+            await broadcast("fish_added", payload)
         # Phase 1.5: 顔認識 person_id 変化に追従して紐付き魚の前面化トリガー
         owner_event = compute_owner_present_event(zs, gf)
         if owner_event is not None:
