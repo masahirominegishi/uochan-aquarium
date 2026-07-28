@@ -110,6 +110,13 @@ ITEM_IMAGE_DIR = _resolve_path(
         _cfg.get("item_image_dir", "/home/mine/Documents/fish_ai_realtime/item_images"),
     )
 )
+# キオスク表示ジャンル (タブ)。item.json と同じく UI 編集データなので専用ルートで出す。
+GENRE_JSON_PATH = _resolve_path(
+    _env_or(
+        "AQUARIUM_GENRE_JSON_PATH",
+        _cfg.get("genre_json_path", "/home/mine/Documents/fish_ai_realtime/kiosk_genres.json"),
+    )
+)
 
 V_THRESH = int(_cfg.get("background_removal", {}).get("value_threshold", 200))
 S_THRESH = int(_cfg.get("background_removal", {}).get("saturation_threshold", 30))
@@ -159,6 +166,15 @@ async def vendor_json_handler(request: web.Request) -> web.Response:
     if not VENDOR_JSON_PATH.is_file():
         return web.Response(status=404)
     resp = web.FileResponse(VENDOR_JSON_PATH)
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+async def genre_json_handler(request: web.Request) -> web.Response:
+    """キオスク表示ジャンル。未作成なら 404 → キオスクは前回の genres-data.js のまま起動する。"""
+    if not GENRE_JSON_PATH.is_file():
+        return web.Response(status=404)
+    resp = web.FileResponse(GENRE_JSON_PATH)
     resp.headers["Cache-Control"] = "no-cache"
     return resp
 
@@ -412,6 +428,7 @@ def make_app() -> web.Application:
     app.router.add_get("/guest_fish/{name}", guest_fish_image_handler)
     app.router.add_get("/item.json", item_json_handler)
     app.router.add_get("/vendors.json", vendor_json_handler)
+    app.router.add_get("/kiosk_genres.json", genre_json_handler)
     app.router.add_get("/item_images/{name}", item_image_handler)
     # フォールバック: それ以外はすべて STATIC_ROOT 配下から配信
     app.router.add_get("/", static_handler)
