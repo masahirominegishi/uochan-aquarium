@@ -80,3 +80,30 @@ watchdog を外し、3つのファイル(`zone_state.json` / `aquarium_event.jso
   頻度を落とすか tmpfs に置く価値があるが、カメラと realtime 側に触るので別件
 - Mac の aquarium repo に、8/21のテレビ制御の作業 (`tv_guard.py` と `systemd/`) が
   **未コミットのまま**残っている
+
+---
+
+## 結果 (2026-08-29 実施・commit 98ff676)
+
+| | メモリ | CPU |
+|---|---|---|
+| 直す前 | 300MB (1時間に35MB増) | コアの約7% |
+| 直した後 | **27168KB で25分間 1KBも動かず** | 約1.5% |
+
+- Mac の stub で12件すべて通過。反応の遅れは中央値53ms・最大53ms (口パク開始で20回計測)
+- pi-main で通し確認: 本番と同じ書き手で `aquarium_event.json` を speaking→idle と書き、
+  **書き込みと同じ秒に `ai_speak_start`**、翌秒に `ai_speak_end` がブリッジのログに出た
+- 水槽前の approach/leave の実客での発火はまだ見ていない (店が無人だった)
+
+### 配り方でつまずいた点 (次回のため)
+
+- **`uochan-aquarium` は sudo NOPASSWD の一覧に入っていない** (camera / realtime /
+  cam1-infer / admin だけ)。start も restart もパスワードを訊かれる
+- しかも `pkill` の SIGTERM は systemd から「正常終了」に見えるので
+  **`Restart=on-failure` が拾わず、落としたまま上がってこない**
+- 今回は `deploy.sh` と同じ setsid 手動起動でしのいだ。systemd 管理に戻すには
+  `pkill -f aquarium_bridge.py; sudo systemctl start uochan-aquarium` を人が打つか、
+  次の電源投入を待つ
+- 配布は `deploy.sh` を使わずこの1ファイルだけ scp した。deploy.sh は
+  `rsync --delete` でツリー丸ごと送るため、pi にしか無いファイル (例 `sound/staff_call.wav`)
+  を消す危険がある
