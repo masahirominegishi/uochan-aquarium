@@ -1,6 +1,6 @@
 """Aquarium WebSocket bridge.
 
-fish_ai_realtime と upload_server が書く 3 ファイルを inotify で見張り、
+fish_ai_realtime と upload_server が書く 3 ファイルの更新時刻を短い周期で見張り、
 水槽 UI 向けのイベントに翻訳して WebSocket で配信する。
 
 監視対象:
@@ -35,8 +35,6 @@ import time
 from pathlib import Path
 
 import websockets
-from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
 
 
 # ─── 設定読み込み ─────────────────────────────────────────
@@ -86,6 +84,16 @@ LEAVE_LINGER_SEC = float(
         _cfg.get("aquarium", {}).get("leave_linger_sec", 1.0),
     )
 )
+# 監視ファイルの更新時刻を見に行く周期 (秒)。
+# 以前は watchdog(inotify) で変更通知を受けていたが、watchdog 6.0.0 に
+# 「置き換え(os.replace)の前半の合図を対応表に積んだまま捨てない」不具合があり
+# (clear_move_records() が定義だけで未使用)、zone_state.json が毎秒26回書き替わる
+# 本番では 1日800MB のメモリ漏れになっていた。詳細は docs/bridge-memory-leak.md。
+POLL_INTERVAL_SEC = float(
+    os.environ.get("AQUARIUM_POLL_SEC", _cfg.get("aquarium", {}).get("poll_sec", 0.05))
+)
+# ファイルが変わらなくても再評価する間隔 (滞在時間で発火する speak / idle 用)。
+FORCE_EVAL_SEC = 1.0
 
 # ─── ロギング ────────────────────────────────────────────
 _log_level = os.environ.get(
@@ -210,7 +218,7 @@ def compute_guest_fish_events(gf):
 
     Phase 1.5 で owner_by_id 追跡を追加: 既存 fish の owner_person_id が None → 設定値に
     変わったタイミングで fish_owner_updated を発火。realtime_loop の _link_fish_to_person
-    や app.py の管理 UI が guest_fish.json を書き換えると watchdog で再評価されてここを通る。
+    や app.py の管理 UI が guest_fish.json を書き換えると、更新時刻の変化で再評価されてここを通る。
     """
     fishes = (gf or {}).get("fishes", []) or []
     current_ids = set()
@@ -311,40 +319,24 @@ async def evaluate_and_emit():
             await broadcast("fish_owner_present", owner_event)
 
 
-class FilesHandler(FileSystemEventHandler):
-    """zone_state.json または aquarium_event.json の変更を検知して再評価をキック。"""
+def _watched_files():
+    files = [ZONE_STATE_FILE, AQUARIUM_EVENT_FILE]
+    if GUEST_FISH_FILE is not None:
+        files.append(GUEST_FISH_FILE)
+    return files
 
-    def __init__(self, loop):
-        self.loop = loop
-        targets = {ZONE_STATE_FILE.resolve(), AQUARIUM_EVENT_FILE.resolve()}
-        if GUEST_FISH_FILE is not None:
-            try:
-                targets.add(GUEST_FISH_FILE.resolve())
-            except OSError:
-                pass
-        self._targets = targets
 
-    def _is_target(self, path_str):
-        try:
-            return Path(path_str).resolve() in self._targets
-        except OSError:
-            return False
+def _file_signature(path):
+    """更新時刻・サイズ・inode の組。無ければ None。
 
-    def _kick(self):
-        asyncio.run_coroutine_threadsafe(evaluate_and_emit(), self.loop)
-
-    def on_modified(self, event):
-        if not event.is_directory and self._is_target(event.src_path):
-            self._kick()
-
-    def on_created(self, event):
-        if not event.is_directory and self._is_target(event.src_path):
-            self._kick()
-
-    def on_moved(self, event):
-        dest = getattr(event, "dest_path", None)
-        if dest and self._is_target(dest):
-            self._kick()
+    本番の書き手は atomic write (別名で書いて os.replace) なので inode も変わる。
+    3 つ揃えて見れば、同一ミリ秒内の書き替えでも取りこぼさない。
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
 
 
 async def ws_handler(websocket):
@@ -391,38 +383,36 @@ async def ws_handler(websocket):
         log.info("client disconnected (%d total)", len(clients))
 
 
-async def periodic_tick():
-    """ファイル変更のないままドゥエル経過するケースを拾うための周期再評価。"""
+async def watch_loop():
+    """監視ファイルの更新時刻を見張り、変わっていたら再評価する。
+
+    変化がなくても FORCE_EVAL_SEC ごとに 1 回は評価する
+    (ファイルが変わらないまま滞在時間が経過して speak / idle になるケース)。
+    """
+    signatures = {}
+    last_forced = 0.0
     while True:
-        await asyncio.sleep(1.0)
-        await evaluate_and_emit()
+        changed = False
+        for path in _watched_files():
+            sig = _file_signature(path)
+            if signatures.get(path, "初回") != sig:
+                signatures[path] = sig
+                changed = True
+        now = time.monotonic()
+        if changed or (now - last_forced) >= FORCE_EVAL_SEC:
+            last_forced = now
+            await evaluate_and_emit()
+        await asyncio.sleep(POLL_INTERVAL_SEC)
 
 
 async def main():
-    loop = asyncio.get_running_loop()
-    observer = Observer()
-    handler = FilesHandler(loop)
-    # zone_state と aquarium_event は同じディレクトリ (fish_ai_realtime)
-    observer.schedule(handler, str(ZONE_STATE_FILE.parent), recursive=False)
-    # guest_fish.json は別ディレクトリ (~/Documents/aquarium/) なので追加 schedule
-    if (
-        GUEST_FISH_FILE is not None
-        and GUEST_FISH_FILE.parent != ZONE_STATE_FILE.parent
-    ):
-        GUEST_FISH_FILE.parent.mkdir(parents=True, exist_ok=True)
-        observer.schedule(handler, str(GUEST_FISH_FILE.parent), recursive=False)
-    observer.start()
-    try:
-        async with websockets.serve(ws_handler, WS_HOST, WS_PORT):
-            log.info("WebSocket listening on ws://%s:%d", WS_HOST, WS_PORT)
-            log.info("watching %s", ZONE_STATE_FILE)
-            log.info("watching %s", AQUARIUM_EVENT_FILE)
-            if GUEST_FISH_FILE is not None:
-                log.info("watching %s", GUEST_FISH_FILE)
-            await periodic_tick()
-    finally:
-        observer.stop()
-        observer.join()
+    async with websockets.serve(ws_handler, WS_HOST, WS_PORT):
+        log.info("WebSocket listening on ws://%s:%d", WS_HOST, WS_PORT)
+        log.info("watching %s (%.0fms 周期)", ZONE_STATE_FILE, POLL_INTERVAL_SEC * 1000)
+        log.info("watching %s", AQUARIUM_EVENT_FILE)
+        if GUEST_FISH_FILE is not None:
+            log.info("watching %s", GUEST_FISH_FILE)
+        await watch_loop()
 
 
 if __name__ == "__main__":
