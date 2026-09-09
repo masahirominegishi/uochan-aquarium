@@ -7,6 +7,7 @@ HTTP サーバー。pi-main の旧 `python3 -m http.server` を置き換える�
   GET  /                    aquarium UI (index.html)
   GET  /upload              お客さん向けアップロードフォーム HTML
   POST /api/upload          画像受信 → HSV 閾値で背景除去 → 保存 → guest_fish.json 追記
+  POST /sales               カフェキオスクの会計の控え → stats/sales-YYYYMMDD.jsonl 追記
   GET  /guest_fish/{name}   切り抜き済みゲスト魚画像配信
   GET  /<その他>            STATIC_ROOT 配下の静的ファイル (sketch.js, fish.js, assets/...)
 
@@ -25,6 +26,7 @@ import os
 import re
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 
 from aiohttp import web
@@ -115,6 +117,16 @@ GENRE_JSON_PATH = _resolve_path(
     _env_or(
         "AQUARIUM_GENRE_JSON_PATH",
         _cfg.get("genre_json_path", "/home/mine/Documents/fish_ai_realtime/kiosk_genres.json"),
+    )
+)
+
+# カフェキオスク (paypay-kiosk) の会計の控えの置き場。来店統計 (occupancy/visitors)
+# と同じ fish_ai_realtime/stats/ に日ごとの jsonl で1行ずつ足す。読むのは管理UIの
+# 「売上」画面。ここは追記だけで、書き換えも削除もしない。
+SALES_DIR = _resolve_path(
+    _env_or(
+        "AQUARIUM_SALES_DIR",
+        _cfg.get("sales_dir", "/home/mine/Documents/fish_ai_realtime/stats"),
     )
 )
 
@@ -237,6 +249,166 @@ async def staff_call_handler(request: web.Request) -> web.Response:
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     log.info("[staff_call] 呼び出し音声を再生")
     return web.json_response({"ok": True, "voice": True})
+
+
+# ─── 売上の控え (カフェキオスクのセルフレジ, 2026-09-09) ──────────────────
+# キオスクは会計が終わったとき・途中でやめたときに、その内容をここへ POST する。
+# 受け取ったものを日ごとのファイルに1行足すだけ。
+#
+# ★これは「お客様が会計を終えたと押した金額」であって PayPay の入金実績ではない。
+#   固定QR + 客が金額を手入力する方式なので、打ち間違い・払わずに帰るが起こりうる。
+#   だから途中でやめた会計 (status=aborted) も消さずに残し、あとで PayPay 側の
+#   明細と突き合わせたときに差の理由を追えるようにしてある。
+#
+# キオスクは届かなかった控えを自分の中に貯めて後で送り直してくる (取りこぼし防止)。
+# 同じ order_id が二度来たら二重計上しないよう、その日のファイルを見て弾く。
+_SALES_STATUS = ("completed", "aborted")
+_SALES_ORDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_SALES_MAX_LINES = 100
+_SALES_CORS = {"Access-Control-Allow-Origin": "*",
+               "Access-Control-Allow-Headers": "Content-Type",
+               "Access-Control-Allow-Methods": "POST, OPTIONS"}
+
+
+def _sales_day(client_ts: str) -> str:
+    """控えを入れる日。原則キオスクの時計 (=会計した瞬間) で決める。
+
+    貯めてから送ってくることがあるので受信時刻では決めない。ただし時計が
+    狂っている (今から7日以上ずれる) ときだけサーバーの日付に倒す。
+    """
+    now = time.time()
+    try:
+        t = datetime.fromisoformat(str(client_ts).replace("Z", "+00:00")).timestamp()
+        if abs(now - t) <= 7 * 86400:
+            return time.strftime("%Y%m%d", time.localtime(t))
+    except Exception:
+        pass
+    return time.strftime("%Y%m%d", time.localtime(now))
+
+
+def _sales_str(v, limit: int) -> str:
+    return str(v if v is not None else "")[:limit]
+
+
+def _normalize_sale(body):
+    """(控えの行, エラー文) を返す。壊れた控えは受け取らない (400)。"""
+    if not isinstance(body, dict):
+        return None, "オブジェクトではありません"
+    order_id = _sales_str(body.get("order_id"), 64).strip()
+    if not _SALES_ORDER_ID_RE.match(order_id):
+        return None, "order_id が不正です"
+    status = body.get("status")
+    if status not in _SALES_STATUS:
+        return None, "status は completed / aborted のどちらかです"
+
+    raw_lines = body.get("lines")
+    if not isinstance(raw_lines, list) or not raw_lines:
+        return None, "明細が空です"
+    if len(raw_lines) > _SALES_MAX_LINES:
+        return None, "明細が多すぎます"
+    lines = []
+    for ln in raw_lines:
+        if not isinstance(ln, dict):
+            return None, "明細が不正です"
+        try:
+            qty = int(ln["qty"])
+            unit_price = int(ln["unit_price"])
+        except Exception:
+            return None, "明細の個数/単価が不正です"
+        if qty <= 0 or unit_price < 0:
+            return None, "明細の個数/単価が不正です"
+        lines.append({
+            "item_id": _sales_str(ln.get("item_id"), 64),
+            "name": _sales_str(ln.get("name"), 200),
+            "vendor_id": _sales_str(ln.get("vendor_id"), 64),
+            "vendor_name": _sales_str(ln.get("vendor_name"), 100),
+            "unit_price": unit_price,     # 会計した瞬間の値段を控える
+            "qty": qty,                   # (あとで値段を変えても過去の売上が動かないように)
+        })
+
+    rounds = []
+    for r in (body.get("rounds") or []):
+        if not isinstance(r, dict):
+            return None, "会計単位が不正です"
+        try:
+            amount = int(r["amount"])
+        except Exception:
+            return None, "会計単位の金額が不正です"
+        if amount < 0:
+            return None, "会計単位の金額が不正です"
+        rounds.append({
+            "vendor_id": _sales_str(r.get("vendor_id"), 64),
+            "vendor_name": _sales_str(r.get("vendor_name"), 100),
+            "amount": amount,
+            "done": bool(r.get("done")),   # 客が「会計できました」を押したか
+        })
+
+    row = {
+        "order_id": order_id,
+        "status": status,
+        "client_ts": _sales_str(body.get("ts"), 40),   # キオスクの時計 (会計した瞬間)
+        "server_ts": round(time.time(), 3),            # pi-main が受け取った時刻
+        "lines": lines,
+        "rounds": rounds,
+        "total": sum(ln["unit_price"] * ln["qty"] for ln in lines),
+        "paid_total": sum(r["amount"] for r in rounds if r["done"]),
+        "source": "kiosk",
+    }
+    return row, None
+
+
+def _sales_already_recorded(path: Path, order_id: str) -> bool:
+    try:
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    if json.loads(line).get("order_id") == order_id:
+                        return True
+                except Exception:
+                    continue
+    except FileNotFoundError:
+        return False
+    return False
+
+
+async def sales_options_handler(request: web.Request) -> web.Response:
+    return web.Response(status=204, headers=_SALES_CORS)
+
+
+async def sales_handler(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "JSON として読めません"},
+                                 status=400, headers=_SALES_CORS)
+    row, err = _normalize_sale(body)
+    if err:
+        log.warning("[sales] 受け取れない控え: %s", err)
+        return web.json_response({"error": err}, status=400, headers=_SALES_CORS)
+
+    day = _sales_day(row["client_ts"])
+    path = SALES_DIR / f"sales-{day}.jsonl"
+    try:
+        SALES_DIR.mkdir(parents=True, exist_ok=True)
+        if _sales_already_recorded(path, row["order_id"]):
+            # 送り直し。控えは既にある = キオスクには成功として返す (溜めたぶんを消させる)
+            log.info("[sales] 送り直し %s (記録済み)", row["order_id"])
+            return web.json_response({"ok": True, "day": day, "duplicate": True},
+                                     headers=_SALES_CORS)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log.error("[sales] 書けなかった %s: %s", path, e)
+        return web.json_response({"error": "保存に失敗しました"},
+                                 status=500, headers=_SALES_CORS)
+
+    log.info("[sales] %s %s 合計%d円 (受取済%d円) 明細%d件",
+             day, row["status"], row["total"], row["paid_total"], len(row["lines"]))
+    return web.json_response({"ok": True, "day": day, "duplicate": False},
+                             headers=_SALES_CORS)
 
 
 async def api_upload_handler(request: web.Request) -> web.Response:
@@ -424,6 +596,8 @@ def make_app() -> web.Application:
     app = web.Application(client_max_size=MAX_BYTES + 1024 * 1024)
     app.router.add_post("/api/upload", api_upload_handler)
     app.router.add_post("/staff_call", staff_call_handler)
+    app.router.add_post("/sales", sales_handler)
+    app.router.add_options("/sales", sales_options_handler)
     app.router.add_get("/upload", upload_form_handler)
     app.router.add_get("/guest_fish/{name}", guest_fish_image_handler)
     app.router.add_get("/item.json", item_json_handler)
@@ -442,6 +616,7 @@ def main():
     log.info("GUEST_FISH_PATH: %s", GUEST_FISH_PATH)
     log.info("PENDING_OWNER_LINK_PATH: %s", PENDING_OWNER_LINK_PATH)
     log.info("ITEM_JSON_PATH: %s", ITEM_JSON_PATH)
+    log.info("SALES_DIR: %s", SALES_DIR)
     log.info("listening on http://%s:%d", HOST, PORT)
     web.run_app(make_app(), host=HOST, port=PORT, print=None)
 
