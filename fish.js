@@ -613,7 +613,8 @@ class Fish {
 // =============================================================
 
 // チューニング用定数
-const GUEST_SIZE_SMALL   = 130;    // 当日以外のゲスト魚の長辺 px
+const GUEST_SIZE_SMALL   = 100;    // 当日以外のゲスト魚の長辺 px (手前の層。2026-10-13 130→100、2 層化に伴い縮小)
+const GUEST_SIZE_BACK    = 65;     // 奥の層のゲスト魚の長辺 px (手前より小さく = 遠近)
 const GUEST_SIZE_TODAY   = 200;    // 入れた当日の魚の長辺 px (他の魚 130 より少し大きめ)
 const GUEST_SIZE_TANK_PRESENT = 300;   // 水槽前に人がいる(ToF on / approach)とき、当日の魚をここまで拡大
 const GUEST_TANK_GROW_LERP    = 0.025; // 当日の魚を 380⇄460 で伸縮する補間係数 (~2秒で到達 @60fps)
@@ -635,6 +636,20 @@ const GUEST_TURN_VY_MAX  = 0.45;   // ターンで入れる縦速度の上限 (p
 // D. 壁反射のジッター + 速度の個体差拡大 (同期崩し)
 const GUEST_BOUNCE_JITTER = 0.18;  // 壁反射時に向きへ加える乱れ (rad 目安)
 // ----------------------------------------------------------------------
+// --- 2 層化 (2026-10-13): 魚が満タンで行き来できなくなったので、奥の層を足して分散 ---
+// 奥 : 当日以外のゲスト魚の 2/3 が棲む。小さく (GUEST_SIZE_BACK)・ゆっくり。奥の水草の後ろに描く。
+// 手前: 残り 1/3 + 当日の魚 + うおちゃん。
+// 層の行き来は左右の端だけ: 端まで来た魚は、相手の層が定員割れなら画面の外へ泳ぎ出し、
+// しばらく姿を消してから同じ側の端から相手の層に泳ぎ込む (左に消えた奥の魚は左から手前に現れる)。
+// 定員が釣り合っているときも少しの確率で渡らせ、行き来を絶やさない (相手が 1 匹過多になり
+// 次に端へ着いた魚が戻る)。渡るかどうかの判定は sketch 側 (層ごとの匹数を知っている) が行う。
+const GUEST_BACK_FRAC         = 2 / 3;  // 奥の層に置く割合 (当日以外の魚のうち)
+const GUEST_BACK_SPEED_MUL    = 0.7;    // 奥の層の遊泳速度倍率 (遠近感)
+const GUEST_SEP_RADIUS_MUL    = 1.15;   // 反発距離 = 魚の長辺 px × これ (130px 時代の 150px と同じ比率)
+const GUEST_CROSS_PAUSE_MIN_MS = 2000;  // 端から消えて相手の層に現れるまでの間 (下限)
+const GUEST_CROSS_PAUSE_MAX_MS = 5000;  // 〃 上限
+const GUEST_CROSS_BALANCED_P   = 0.15;  // 定員が釣り合っているときに端で渡る確率
+const GUEST_CROSS_EXIT_VX_MIN  = 0.9;   // 渡ると決めてから画面外へ出るときの横速度の下限 (px/frame)
 const GUEST_DROP_VY0     = 2.2;    // 落下開始時の下向き初速
 const GUEST_DROP_GRAVITY = 0.42;   // 落下中の加速度
 const GUEST_RIPPLE_SEC   = 0.85;   // 着水波紋の表示時間
@@ -679,9 +694,20 @@ class GuestFish {
     this.image = image;                      // p5.Image (背景除去済)
     this.id = options.id || `guest_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
 
+    // 層: 'front' (手前、従来の層) / 'back' (奥、2026-10-13 追加)。当日の魚は常に手前。
+    this.layer = (options.layer === 'back' && !this._isTodayId(options.id, !!options.dropIn)) ? 'back' : 'front';
+    // 層の行き来 (端から出て、消えて、相手の層に入る)
+    this.crossing = false;   // 端で「渡る」と決めて画面外へ泳ぎ出している最中
+    this.hidden   = false;   // 画面外で姿を消している (描かない・数えない・反発しない)
+    this._crossReappearAt = 0;   // hidden を解く millis()
+    this._crossSide = 0;         // 消えた側 (-1=左 / +1=右)。同じ側から現れる
+    // 渡ってよいかを sketch に問う関数 (fish) => boolean。未設定なら渡らない (従来どおり折り返す)。
+    this.mayCross = typeof options.mayCross === 'function' ? options.mayCross : null;
+
     // 表示サイズ: 長辺基準で small / big の 2 段。実描画スケールはその間を毎フレーム lerp。
     this._longest   = Math.max(image.width, image.height);
     this.smallScale = (options.smallSize || GUEST_SIZE_SMALL) / this._longest;
+    this.backScale  = (options.backSize  || GUEST_SIZE_BACK)  / this._longest;
     this.todayScale = (options.todaySize || GUEST_SIZE_TODAY) / this._longest;
     this.tankPresentScale = (options.tankPresentSize || GUEST_SIZE_TANK_PRESENT) / this._longest;
 
@@ -720,7 +746,7 @@ class GuestFish {
     if (this.entering) {
       this.x  = options.x !== undefined ? options.x : random(width * 0.15, width * 0.85);
       // 入場開始時のサイズ: 新規登録は big、起動時の既存魚は通常 (= 飼い主不在なら small)
-      this.scale = this.isToday() ? this.todayScale : this.smallScale;
+      this.scale = this.isToday() ? this.todayScale : this._layerSmallScale();
       this.y  = -this._longest * this.scale * 0.7;            // 画面上端より上から落とす
       this.vx = (random() < 0.5 ? -1 : 1) * random(0.35, 0.7);  // 着水後に使う水平速度
       this.vy = GUEST_DROP_VY0;
@@ -730,7 +756,7 @@ class GuestFish {
       const speed = options.speed || random(0.35, 1.0);   // D: 個体差を少し広げて同期を崩す
       this.vx = (random() < 0.5 ? -1 : 1) * speed;
       this.vy = 0;
-      this.scale = this.smallScale;
+      this.scale = this._layerSmallScale();
     }
 
     // 見た目の傾き (rad)。進行方向へ ±GUEST_TILT_MAX_DEG。lerp で滑らかに。
@@ -810,16 +836,25 @@ class GuestFish {
   // ID が日付形式でないもの (テスト等) はライブ追加 (dropIn) を当日扱いにフォールバック。
   // 当日の魚 = 他の魚より前のレイヤーに、大きめ (todayScale)、ToF 在席で 460 へ。
   isToday() {
-    const m = /^(\d{8})_/.exec(this.id || '');
-    return m ? (m[1] === _ymdToday()) : this.dropIn;
+    return this._isTodayId(this.id, this.dropIn);
   }
+  _isTodayId(id, dropIn) {
+    const m = /^(\d{8})_/.exec(id || '');
+    return m ? (m[1] === _ymdToday()) : !!dropIn;
+  }
+
+  // 奥の層にいるか
+  isBack() { return this.layer === 'back'; }
+
+  // 通常の遊泳中の基準サイズ (層で違う)
+  _layerSmallScale() { return this.layer === 'back' ? this.backScale : this.smallScale; }
 
   // いま目指す表示スケール:
   //  当日の魚 (dropIn) … 人が水槽前(ToF on)なら うおちゃん大(tankPresentScale)、いなければ todayScale。
   //  それ以外 … 小。
   _targetScale(personAtTank = false) {
     if (this.isToday()) return personAtTank ? this.tankPresentScale : this.todayScale;
-    return this.smallScale;
+    return this._layerSmallScale();
   }
 
   // 進行方向に応じた目標傾き (rad)。
@@ -833,6 +868,12 @@ class GuestFish {
   }
 
   update(neighbors = null, personAtTank = false) {
+    // 層をまたぐ途中 (画面外で姿を消している): 時間が来たら同じ側の端から相手の層に入る
+    if (this.hidden) {
+      if (millis() >= this._crossReappearAt) this._reappear();
+      return;
+    }
+
     // お祝いポップ中は専用の振り付けが位置・スケール・しっぽを支配する (通常遊泳は止める)
     if (this.popPhase !== null) {
       this._updatePop();
@@ -951,7 +992,7 @@ class GuestFish {
   _updateSwim(exciting = false, neighbors = null) {
     // B/C: たまに進行角を変える。低確率で水平の向きも反転 (レーン化を防ぐ)、
     //      縦成分は ±GUEST_TURN_VY_MAX まで少し広めに取り、横はその分を残して速度を保つ。
-    if (millis() >= this.nextTurnAt) {
+    if (millis() >= this.nextTurnAt && !this.crossing) {
       const spd = Math.max(0.35, Math.hypot(this.vx, this.vy));
       if (random() < GUEST_TURN_FLIP_P) this.facing = -this.facing;   // B
       const vy = random(-GUEST_TURN_VY_MAX, GUEST_TURN_VY_MAX);       // C
@@ -962,16 +1003,20 @@ class GuestFish {
     }
 
     // A: セパレーション — 近くの魚から穏やかに離れる (塊を直接ほどく主軸)。
-    if (neighbors) {
+    //    同じ層の魚だけが相手。奥と手前の重なりは気にしない (2026-10-13)。
+    //    反発距離は自分の表示サイズに比例 (奥の小さい魚は狭く)。
+    if (neighbors && !this.crossing) {
       let sx = 0, sy = 0;
-      const r2 = GUEST_SEP_RADIUS * GUEST_SEP_RADIUS;
+      const sepR = Math.max(40, this._longest * this.scale * GUEST_SEP_RADIUS_MUL);
+      const r2 = sepR * sepR;
       for (const other of neighbors) {
         if (other === this || other.entering || other.popPhase !== null) continue;
+        if (other.hidden || other.layer !== this.layer) continue;
         const dx = this.x - other.x, dy = this.y - other.y;
         const d2 = dx * dx + dy * dy;
         if (d2 > 0.01 && d2 < r2) {
           const d = Math.sqrt(d2);
-          const w = (1 - d / GUEST_SEP_RADIUS) / d;   // 近いほど強く、方向は正規化
+          const w = (1 - d / sepR) / d;   // 近いほど強く、方向は正規化
           sx += dx * w; sy += dy * w;
         }
       }
@@ -985,17 +1030,68 @@ class GuestFish {
     }
 
     // 「気づいたよ!」リアクション中は速く動き (近づいてくる感)、上下のゆらぎも大きく (はしゃぐ感)
-    const spdMul = exciting ? GUEST_NOTICE_SPEED : 1.0;
+    const spdMul = (exciting ? GUEST_NOTICE_SPEED : 1.0) * (this.layer === 'back' ? GUEST_BACK_SPEED_MUL : 1.0);
     const bobMul = exciting ? GUEST_NOTICE_BOB   : 1.0;
     this.x += this.vx * spdMul;
     this.y += this.vy * spdMul + sin(this.bobPhase) * 0.25 * bobMul;
 
-    // 壁で反射 (D: 反射時に向きへ微小なジッターを足して同期を崩す)
     const half = this._longest * this.scale * 0.5;
-    if (this.x < half && this.vx < 0)            { this.vx = Math.abs(this.vx);  this.facing = 1;  this._bounceJitter(); }
-    if (this.x > width - half && this.vx > 0)    { this.vx = -Math.abs(this.vx); this.facing = -1; this._bounceJitter(); }
+
+    // 層をまたぐ最中: 折り返さずに画面の外まで泳ぎ切り、完全に見えなくなったら姿を消す
+    if (this.crossing) {
+      if (this.x < -half || this.x > width + half) this._vanish(this.vx < 0 ? -1 : +1);
+      // 上下だけは壁で反射
+      if (this.y < half && this.vy < 0)          { this.vy = Math.abs(this.vy); }
+      if (this.y > height - half && this.vy > 0) { this.vy = -Math.abs(this.vy); }
+      return;
+    }
+
+    // 左右の端に着いた: 相手の層へ渡るか (sketch が層ごとの匹数で判断)、従来どおり折り返すか
+    const atLeft  = this.x < half && this.vx < 0;
+    const atRight = this.x > width - half && this.vx > 0;
+    if ((atLeft || atRight) && this._decideCross()) {
+      this.crossing = true;
+      // まっすぐ外へ。遅い個体が端で何秒も漂わないよう、外向きの速さに下限を置く
+      this.vx = (atLeft ? -1 : 1) * Math.max(Math.abs(this.vx), GUEST_CROSS_EXIT_VX_MIN);
+      this.vy *= 0.3;
+      return;
+    }
+
+    // 壁で反射 (D: 反射時に向きへ微小なジッターを足して同期を崩す)
+    if (atLeft)                                  { this.vx = Math.abs(this.vx);  this.facing = 1;  this._bounceJitter(); }
+    if (atRight)                                 { this.vx = -Math.abs(this.vx); this.facing = -1; this._bounceJitter(); }
     if (this.y < half && this.vy < 0)            { this.vy = Math.abs(this.vy);  this._bounceJitter(); }
     if (this.y > height - half && this.vy > 0)   { this.vy = -Math.abs(this.vy); this._bounceJitter(); }
+  }
+
+  // 端に着いたとき、相手の層へ渡るか。当日の魚・演出中・判定関数なしは渡らない。
+  _decideCross() {
+    if (this.isToday() || this.entering || this.popPhase !== null) return false;
+    if (!this.mayCross) return false;
+    try { return !!this.mayCross(this); } catch (e) { return false; }
+  }
+
+  // 画面外に出切った: 姿を消し、所属を相手の層に移す (匹数は移した先で数える)。
+  _vanish(side) {
+    this.crossing = false;
+    this.hidden   = true;
+    this._crossSide = side;
+    this.layer = this.layer === 'back' ? 'front' : 'back';
+    this._crossReappearAt = millis() + random(GUEST_CROSS_PAUSE_MIN_MS, GUEST_CROSS_PAUSE_MAX_MS);
+  }
+
+  // 消えた側の端から、相手の層のサイズで泳ぎ込む (画面外なのでサイズの切替は見えない)。
+  _reappear() {
+    this.hidden = false;
+    this.scale  = this._targetScale();
+    const half  = this._longest * this.scale * 0.5;
+    const speed = random(0.35, 1.0);
+    this.x  = this._crossSide < 0 ? -half : width + half;
+    this.y  = random(height * 0.2, height * 0.75);
+    this.vx = this._crossSide < 0 ? speed : -speed;
+    this.vy = random(-GUEST_TURN_VY_MAX, GUEST_TURN_VY_MAX) * 0.5;
+    this.facing = this.vx >= 0 ? 1 : -1;
+    this.nextTurnAt = millis() + random(GUEST_TURN_MIN_SEC, GUEST_TURN_MAX_SEC) * 1000;
   }
 
   // D: 壁反射時に速度ベクトルを小さくランダム回転させ、揃った折り返しをばらす。
@@ -1009,6 +1105,8 @@ class GuestFish {
   }
 
   draw() {
+    if (this.hidden) return;   // 層をまたぐ途中 (画面外)
+
     // ── 着水波紋 (水面 y≈0 のあたりに広がる扁平リング) ──
     if (this.splashedAt > 0) {
       const dt = (millis() - this.splashedAt) / 1000;

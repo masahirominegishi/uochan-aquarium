@@ -198,6 +198,16 @@ function setup() {
   // 起動時の既存魚は draw() 内のディスペンサが _startupQueue から 1 匹ずつ取り出して
   // 時間差でドロップインさせる (音なし)。_STARTUP_WINDOW_MS を過ぎてから来た fish_added は
   // ライブの新規登録扱いで即ドロップイン + 着水音。
+
+  // 手元確認用 (?demo=1): ブリッジ無しで /guest_fish.json を読み、ブリッジの初期同期と同じ
+  // fish_added を流す。本番 (kiosk は ?demo なし) では通らない。
+  if (new URLSearchParams(location.search).get('demo')) {
+    fetch('/guest_fish.json').then((r) => r.json()).then((d) => {
+      for (const f of (d.fishes || [])) {
+        window.aquarium.onEvent('fish_added', { id: f.id, image_url: `/guest_fish/${f.image}`, owner_person_id: f.owner_person_id });
+      }
+    }).catch((e) => console.warn('[aquarium] demo: guest_fish.json を読めない', e));
+  }
 }
 
 // ゲスト魚が水槽に入る瞬間の効果音: drop → (ended で) into。
@@ -223,6 +233,13 @@ function draw() {
   // 2) 光のゆらめき（上から差し込む光をうっすら）
   _drawLightRays();
 
+  // 2.5) 魚の更新 (描画は層ごとに下で)。反発は同じ層の中だけ (fish.js)。
+  mainFish.update();
+  for (const g of guestFishes) g.update(guestFishes, _personAtTank);   // 分離 + ToF在席で当日魚を拡大
+
+  // 2.7) 奥の層のゲスト魚 (2026-10-13)。奥の水草より後ろに描き、水草が少しかぶって奥行きを出す。
+  for (const g of guestFishes) { if (g.isBack() && !g.isPopFront()) g.draw(); }
+
   // 3) 奥側の水草（魚より後ろに描く）
   _drawPlants(true);
 
@@ -240,15 +257,13 @@ function draw() {
     _lastStartupSpawnAt = millis();
   }
 
-  // 5) 魚を更新 → 描画。レイヤー (奥→手前):
-  //      奥  : 当日以外のゲスト魚 (小)
-  //      中  : 入れた当日の魚 (dropIn、中間サイズ) … 他のゲスト魚より前・うおちゃんより後ろ
-  //      手前: うおちゃん本体
-  mainFish.update();
-  for (const g of guestFishes) g.update(guestFishes, _personAtTank);   // 分離 + ToF在席で当日魚を拡大
-  for (const g of guestFishes) { if (!g.isToday() && !g.isPopFront()) g.draw(); }   // 奥: 当日以外
-  for (const g of guestFishes) { if (g.isToday()  && !g.isPopFront()) g.draw(); }   // 中: 当日の魚 (他より前)
-  mainFish.draw();                                                                  // うおちゃん
+  // 5) 手前の層の魚を描画。順 (奥→手前):
+  //      手前の層の当日以外のゲスト魚 (小)
+  //      入れた当日の魚 (dropIn、中間サイズ) … 他のゲスト魚より前・うおちゃんより後ろ
+  //      うおちゃん本体 (常に手前の層)
+  for (const g of guestFishes) { if (!g.isBack() && !g.isToday() && !g.isPopFront()) g.draw(); }   // 手前: 当日以外
+  for (const g of guestFishes) { if (g.isToday()  && !g.isPopFront()) g.draw(); }                  // 当日の魚 (他より前)
+  mainFish.draw();                                                                                 // うおちゃん
   // お祝いポップで手前に来た魚はうおちゃんより前 (最前面) に描く
   for (const g of guestFishes) { if (g.isPopFront()) g.draw(); }                  // 最手前
 
@@ -437,6 +452,40 @@ function _cancelHandoff() {
   if (_handoffTimer) { clearTimeout(_handoffTimer); _handoffTimer = null; }
 }
 
+// -------------------------------------------------------------
+// ゲスト魚の 2 層 (2026-10-13): 奥 2/3・手前 1/3 (当日以外の魚のうち)。
+// 当日の魚は常に手前で、定員には数えない。姿を消している魚は移動先の層で数える。
+// -------------------------------------------------------------
+function _layerCounts() {
+  let back = 0, front = 0;
+  for (const g of guestFishes) {
+    if (g.isToday()) continue;
+    if (g.isBack()) back++; else front++;
+  }
+  return { back, front };
+}
+function _backTarget(total) { return Math.round(total * GUEST_BACK_FRAC); }
+
+// 端に着いた魚が相手の層へ渡ってよいか。
+//   相手の層が定員割れ → 渡る / 自分の層が定員過多 → 渡る / 釣り合い → 少しの確率で渡る
+function _mayCross(fish) {
+  const c = _layerCounts();
+  const total = c.back + c.front;
+  const backT = _backTarget(total), frontT = total - backT;
+  const fromBack = fish.isBack();
+  const toCount = fromBack ? c.front : c.back,  toT   = fromBack ? frontT : backT;
+  const fromCnt = fromBack ? c.back  : c.front, fromT = fromBack ? backT  : frontT;
+  if (toCount < toT)  return true;
+  if (fromCnt > fromT) return true;
+  return random() < GUEST_CROSS_BALANCED_P;
+}
+
+// 新しく入る魚の層。当日の魚は手前。それ以外は「自分を含めた匹数」での目標に奥が足りなければ奥。
+function _pickLayerForNew() {
+  const c = _layerCounts();
+  return c.back < _backTarget(c.back + c.front + 1) ? 'back' : 'front';
+}
+
 window.aquarium = {
   onEvent(type, payload = {}) {
     console.log('[aquarium] event:', type, payload);
@@ -565,6 +614,8 @@ window.aquarium = {
         const fish = new GuestFish(img, {
           ...options,
           ...(opts.x !== undefined ? { x: opts.x } : {}),
+          layer: _pickLayerForNew(),        // 奥 2/3・手前 1/3 (当日の魚は GuestFish 側で手前に固定)
+          mayCross: _mayCross,              // 端に着いたとき層を渡ってよいか
           dropIn: !!opts.dropIn,
           startupEntry: !!opts.startupEntry,
           onSplash: opts.withSound ? () => _playGuestFishEnterSound() : null,
