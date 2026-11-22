@@ -1,0 +1,7 @@
+[Unit]
+Description=Uochan 朝の再起動 (メモリ漏れのリセット + labwc autostart でテレビ点灯)
+
+[Service]
+Type=oneshot
+# sudoers.d で NOPASSWD 済みのコマンドそのもの (パスまで一致させること)
+ExecStart=/usr/bin/sudo -n /usr/bin/systemctl reboot

@@ -1,0 +1,12 @@
+[Unit]
+Description=毎朝8時に再起動する
+
+[Timer]
+OnCalendar=*-*-* 08:00:00
+AccuracySec=1min
+# 絶対に true にしないこと。8時に電源が入っていなかった場合、起動直後に
+# 取りこぼしとして発火して再起動ループになる
+Persistent=false
+
+[Install]
+WantedBy=timers.target

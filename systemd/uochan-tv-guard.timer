@@ -1,0 +1,11 @@
+[Unit]
+Description=Uochan TV guard を2分ごとに走らせる
+
+[Timer]
+OnCalendar=*:0/2
+AccuracySec=20s
+# 止まっていた間の取りこぼしを後追いしない (消灯は「今」の判断でしか意味がない)
+Persistent=false
+
+[Install]
+WantedBy=timers.target

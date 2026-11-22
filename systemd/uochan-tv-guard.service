@@ -1,0 +1,10 @@
+[Unit]
+Description=Uochan TV guard (65吋を閉店後に自動消灯 / 深夜は強制消灯)
+Documentation=man:tv_guard.py
+
+[Service]
+Type=oneshot
+# wlr-randr が labwc に話しかけるために要る。user サービスには自動で入らない
+Environment=WAYLAND_DISPLAY=wayland-0
+WorkingDirectory=%h/Documents/aquarium
+ExecStart=/usr/bin/python3 %h/Documents/aquarium/tv_guard.py
